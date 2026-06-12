@@ -13,6 +13,11 @@ Input: MNIST as row-based sequence (B, 28, 28) — 28 time steps × 28 pixel fea
 """
 import os, sys
 import numpy as np
+
+import torch
+
+
+from argparse import Namespace
 from torch.utils.data import DataLoader
 
 _p = os.path.dirname(os.path.abspath(__file__))
@@ -20,19 +25,24 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import MNIST_CL
+from shared.dataset_cl import MNIST_CL
 from tasks.mnist.utils_single import train, test, accuracy
 from experiment.CL_experiment import CL_Experiment
-from utils.metrics import CLMetrics, cohen_kappa
-from shared.utils import gim_predict
+from shared.metrics import CLMetrics, cohen_kappa
+from shared.utils import gim_predict, MNIST_PERM
 
-_TT        = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
+_TT = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
 _NUM_TASKS = 5
+
+
+def _px(x):
+    # permuted MNIST from GIM paper, kept as (B,28,28)
+    return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
 def calculate_accuracy(train_models, variant, loader, device, output_size, module_id):
     num_correct, num_total = 0.0, 0
     for x, y in loader:
-        x = x.squeeze(1).to(device)
+        x = _px(x).to(device)
         _, acc = test(train_models, variant, x, y, accuracy, device, output_size, module_id=module_id)
         num_correct += acc * y.size(0)
         num_total   += y.size(0)
@@ -52,12 +62,12 @@ def run_gim_mnist_mh(variant, args, verbose = True):
     """
 
 
-    exp_args = __import__('argparse').Namespace(
+    exp_args = Namespace(
         models=[variant],
         input_size=28,
         output_size=2,
         hidden_size_rnn=args.hidden_size_rnn,
-        hidden_sizes_lmn=args.hidden_sizes_lmn,
+        hidden_sizes_lmn=[128],  # LMN/ALMN-only field; unused by the ALSTM variant we run
         memory_size_lmn=128,
         hidden_size_autoencoder=args.hidden_size_autoencoder,
         type_A=False,
@@ -79,32 +89,36 @@ def run_gim_mnist_mh(variant, args, verbose = True):
     device = cl_exp.get_device()
     train_models, train_autoencoders = cl_exp.create_models()
 
-    data_root  = args.data_dir
+    data_root = args.data_dir
     max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
     batch_size = args.batch_size
     image_size = 28
     epochs = args.epochs
+    max_grad_norm = 5.0
     mnist_train = MNIST_CL(data_root, download=False, train=True,
-                           perc_val=0.25, batch_size=batch_size, output_size=2,
-                           image_size=image_size)
-    mnist_test  = MNIST_CL(data_root, download=False, train=False, output_size=2, image_size=image_size)
+                           perc_val=0.25, batch_size=batch_size, output_size=2)
+    mnist_test = MNIST_CL(data_root, download=False, train=False, output_size=2)
+    mnist_train.set_holdout_config(
+        holdout_n = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout = getattr(args, "use_holdout", False),
+    )
 
-    metrics          = CLMetrics(num_tasks=_NUM_TASKS)
+    metrics = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
     for task_id in range(_NUM_TASKS):
-        mnist_train.choose_subset(_TT[task_id])
+        mnist_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
 
-        if verbose:
-            print(f"Task {task_id+1}/{_NUM_TASKS}")
 
-        mnist_test.choose_subset(_TT[task_id])
+        mnist_test.choose_subset(task_pairs[task_id])
         loader_pt = DataLoader(mnist_test, batch_size=batch_size,
                                shuffle=False, drop_last=False)
         num_correct, num_total = 0.0, 0
         for x, y in loader_pt:
-            x = x.squeeze(1).to(device)
+            x = _px(x).to(device)
             _, acc = test(train_models, variant, x, y, accuracy, device, 2, module_id=task_id)
             num_correct += acc * y.size(0)
             num_total += y.size(0)
@@ -112,31 +126,30 @@ def run_gim_mnist_mh(variant, args, verbose = True):
 
         for _ in range(epochs):
             for x, y in loader_train:
-                x = x.squeeze(1).to(device)
-                train(train_models, variant, x, y, accuracy, device, 2, args.max_grad_norm)
+                x = _px(x).to(device)
+                train(train_models, variant, x, y, accuracy, device, 2, max_grad_norm)
 
         final_val_acc = calculate_accuracy(train_models, variant, loader_val, device, 2, task_id)
         subtask_val_accs.append(final_val_acc)
 
-        if verbose: print(f"  [test after task {task_id+1}]")
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
-            mnist_test.choose_subset(_TT[eval_id])
+            mnist_test.choose_subset(task_pairs[eval_id])
             loader_test = DataLoader(mnist_test, batch_size=batch_size,
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
             for x, y in loader_test:
-                x = x.squeeze(1).to(device)
+                x = _px(x).to(device)
                 # MH: oracle routing — use eval_id directly as module_id
                 preds = gim_predict(train_models, x, task_id=eval_id)
                 all_preds.extend(preds)
                 all_labels.extend(y.numpy())
-            all_preds  = np.array(all_preds)
             num_of_correct_predictions = 0
             num_of_samples = len(all_labels)
             for i in range(num_of_samples):
                 if all_preds[i] == all_labels[i]:
                     num_of_correct_predictions += 1
-            acc   = float(num_of_correct_predictions / num_of_samples)
+            acc = float(num_of_correct_predictions / num_of_samples)
             kappa = cohen_kappa(all_labels, all_preds)
             metrics.record(after_task=task_id, eval_task=eval_id, acc=acc)
             metrics.record_kappa(after_task=task_id, eval_task=eval_id, kappa=kappa)

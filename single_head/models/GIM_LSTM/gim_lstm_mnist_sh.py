@@ -6,7 +6,8 @@ Original paper: "Continual Learning with Gated Incremental Memories" (Cossu et a
 Original repo:  models/GIM/repo/mnist.py
 
 How GIM works:
-  - ALSTM: each module is an LSTM; ALMN: each module is an LMN (Linear Memory Network).
+  - ALSTM: each module is an LSTM
+  ALMN: each module is an LMN (Linear Memory Network).
   - One autoencoder (AE) is trained alongside the main model for each task.
   - Module growing: if val_acc < threshold_acc after task t, a new module is added
     before moving to task t+1.  threshold_acc=1.01 (default) → always add one module
@@ -27,7 +28,12 @@ Input: MNIST as row-based sequence (B, 28, 28) — 28 time steps × 28 pixel fea
 """
 import os
 import sys
+import argparse
 import numpy as np
+
+import torch
+
+
 from torch.utils.data import DataLoader
 
 _p = os.path.dirname(os.path.abspath(__file__))
@@ -35,26 +41,31 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import MNIST_CL
+from shared.dataset_cl import MNIST_CL
 from tasks.mnist.utils_single import train, test, accuracy, train_autoencoder, test_autoencoder
 from tasks.utils import MSEMasked
 from experiment.CL_experiment import CL_Experiment
-from utils.metrics import CLMetrics, cohen_kappa
-from shared.utils import gim_predict
+from shared.metrics import CLMetrics, cohen_kappa
+from shared.utils import gim_predict, MNIST_PERM
 
-_TT        = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
+_TT = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
 _NUM_TASKS = 5
 
+
+
+def _px(x):
+    # permuted MNIST from GIM paper, kept as (B,28,28)
+    return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
 def calculate_accuracy(train_models, variant, loader, device, output_size):
     num_correct = 0.0
     num_total = 0
     for x, y in loader:
-        x = x.squeeze(1)
-        batch_size   = y.size(0)
+        x = _px(x)
+        batch_size = y.size(0)
         _, acc = test(train_models, variant, x, y, accuracy, device, output_size)
         num_correct = num_correct +  acc * batch_size
-        num_total   = num_total   + batch_size
+        num_total = num_total   + batch_size
     return num_correct / num_total
 
 def run_gim_mnist(variant, args, verbose = True):
@@ -73,24 +84,23 @@ def run_gim_mnist(variant, args, verbose = True):
     train_models       : dict         — original model dict (ALSTM or ALMN)
     train_autoencoders : list         — one AE per task
     """
-    hidden_size_rnn         = args.hidden_size_rnn
-    hidden_sizes_lmn        = args.hidden_sizes_lmn
+    hidden_size_rnn = args.hidden_size_rnn
+    hidden_sizes_lmn = [128]  # LMN/ALMN-only field; unused by the ALSTM variant we run
     hidden_size_autoencoder = args.hidden_size_autoencoder
-    learning_rate           = args.learning_rate
-    batch_size              = args.batch_size
-    data_dir                = args.data_dir
-    max_samples             = args.subset
-    epochs                  = args.epochs
-    max_grad_norm           = 5.0
-    image_size              = 28
-    input_size              = image_size
-    output_size             = 2
+    learning_rate = args.learning_rate
+    batch_size = args.batch_size
+    data_dir = args.data_dir
+    max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
+    epochs = args.epochs
+    max_grad_norm = 5.0
+    image_size = 28
+    input_size = image_size
+    output_size = 2
 
-    # ── Build exp_args matching the original repo's argparse Namespace ────────
-    # CL_Experiment expects exactly these fields (see repo/experiment/CL_experiment.py).
-    exp_args = __import__('argparse').Namespace(
+    exp_args = argparse.Namespace(
         models=[variant],
-        input_size=input_size,
+        input_size = image_size,
         output_size=output_size,
         hidden_size_rnn=hidden_size_rnn,
         hidden_sizes_lmn=hidden_sizes_lmn,
@@ -110,38 +120,36 @@ def run_gim_mnist(variant, args, verbose = True):
         plot_folder="plots/tmp/",
     )
 
-    # CL_Experiment.create_models() builds the ALSTM/ALMN and one AE per task
     cl_exp = CL_Experiment(exp_args)
     device = cl_exp.get_device()
     train_models, train_autoencoders = cl_exp.create_models()
 
-    # ── Data ─────────────────────────────────────────────────────────────────
     mnist_train = MNIST_CL(data_dir, download=False, train=True,
-                           perc_val=0.25, batch_size=batch_size, output_size=output_size,
-                           image_size=image_size)
-    mnist_test  = MNIST_CL(data_dir, download=False, train=False, output_size=output_size,
-                           image_size=image_size)
+                           perc_val=0.25, batch_size=batch_size, output_size=output_size)
+    mnist_test = MNIST_CL(data_dir, download=False, train=False, output_size=output_size)
+    mnist_train.set_holdout_config(
+        holdout_n = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout = getattr(args, "use_holdout", False),
+    )
 
-    metrics          = CLMetrics(num_tasks=_NUM_TASKS)
+    metrics = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
-    # ── Task loop ─────────────────────────────────────────────────────────────
     for task_id in range(_NUM_TASKS):
-        mnist_train.choose_subset(_TT[task_id])
+        mnist_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
 
-        if verbose:
-            print(f"Task {task_id + 1}/{_NUM_TASKS}")
 
         # Pre-task accuracy on this task before training it (for FWT)
-        mnist_test.choose_subset(_TT[task_id])
+        mnist_test.choose_subset(task_pairs[task_id])
         loader_pt = DataLoader(mnist_test, batch_size=batch_size,
                                shuffle=False, drop_last=False)
         metrics.record_pretrain(task_id, calculate_accuracy(train_models, variant, loader_pt, device, output_size))
 
         for _ in range(epochs):
             for x, y in loader_train:
-                x = x.squeeze(1)
+                x = _px(x)
                 if train_autoencoders:
                     train_autoencoder(
                         train_autoencoders[0][task_id],
@@ -155,15 +163,14 @@ def run_gim_mnist(variant, args, verbose = True):
 
         # R-matrix: evaluate on all tasks seen so far
         # test_autoencoder selects the module with the lowest AE reconstruction error
-        if verbose:
-            print(f"  [test after task {task_id + 1}]")
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
-            mnist_test.choose_subset(_TT[eval_id])
+            mnist_test.choose_subset(task_pairs[eval_id])
             loader_test = DataLoader(mnist_test, batch_size=batch_size,
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
             for x, y in loader_test:
-                x = x.squeeze(1)
+                x = _px(x)
                 if train_autoencoders:
                     # Route: pick the module whose AE best reconstructs this input
                     _, mod_id = test_autoencoder(train_autoencoders, x, MSEMasked, device)
@@ -172,9 +179,13 @@ def run_gim_mnist(variant, args, verbose = True):
                 preds = gim_predict(train_models, x, task_id=mod_id)
                 all_preds.extend(preds)
                 all_labels.extend(y.numpy())
-            all_preds  = np.array(all_preds)
+            all_preds = np.array(all_preds)
             all_labels = np.array(all_labels)
-            acc   = float((all_preds == all_labels).mean())
+            num_correct = 0
+            for i in range(len(all_preds)):
+                if all_preds[i] == all_labels[i]:
+                    num_correct += 1
+            acc = float(num_correct / len(all_labels))
             kappa = cohen_kappa(all_labels, all_preds)
             metrics.record(after_task=task_id, eval_task=eval_id, acc=acc)
             metrics.record_kappa(after_task=task_id, eval_task=eval_id, kappa=kappa)

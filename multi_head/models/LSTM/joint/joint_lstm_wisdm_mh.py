@@ -17,10 +17,10 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
+from shared.dataset_cl import WISDM_CL
 from tasks.mnist.utils_single import accuracy
-from utils.metrics import CLMetrics, cohen_kappa
-from models.multi_head_utils import MultiHeadLSTM, _forward_mh
+from shared.metrics import CLMetrics, cohen_kappa
+from models.LSTM.multi_head_lstm_model import MultiHeadLSTM
 
 _TT        = [[0, 1], [2, 3], [4, 5]]
 _NUM_TASKS = 3
@@ -32,8 +32,9 @@ def calculate_accuracy(model, loader):
     with torch.no_grad():
         for x, y in loader:
             x = x.to(model.device)
+            y = y.to(model.device)
             batch_size   = y.size(0)
-            num_correct  = num_correct + accuracy(_forward_mh(model, x), y) * batch_size
+            num_correct  = num_correct + accuracy(model(x), y) * batch_size
             num_total    = num_total   + batch_size
     return num_correct / num_total
 
@@ -49,21 +50,28 @@ def run_joint_lstm_wisdm_mh(args, verbose = True):
     criterion   = torch.nn.CrossEntropyLoss()
     data_root   = args.data_dir
     max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
 
     wisdm_train = WISDM_CL(data_root, train=True,  download=False,
                          perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     train_datasets, val_datasets = [], []
     for t in range(_NUM_TASKS):
         model.add_head(t)
-        wisdm_train.choose_subset(_TT[t])
+        wisdm_train.choose_subset(task_pairs[t])
         loader_train, loader_val = wisdm_train.get_train_val_loader(max_samples=max_samples)
         for src, store in [(loader_train, train_datasets), (loader_val, val_datasets)]:
             tmp = DataLoader(src.dataset, batch_size=256, shuffle=False, drop_last=False)
             batch_inputs, batch_labels = [], []
             for x, y in tmp:
-                batch_inputs.append(x); batch_labels.append(y)
+                batch_inputs.append(x)
+                batch_labels.append(y)
             store.append(TensorDataset(torch.cat(batch_inputs), torch.cat(batch_labels)))
 
     loaders_train = [DataLoader(train_datasets[t], batch_size=batch_size, shuffle=True)
@@ -83,8 +91,10 @@ def run_joint_lstm_wisdm_mh(args, verbose = True):
         model.train()
         for task_id, (x, y) in all_batches:
             model.set_task(task_id)
+            x = x.to(device)
+            y = y.to(device)
             optimizer.zero_grad()
-            logits = _forward_mh(model, x)
+            logits = model(x)
             loss   = criterion(logits, y)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -94,20 +104,21 @@ def run_joint_lstm_wisdm_mh(args, verbose = True):
         model.set_task(t)
         subtask_val_accs.append(calculate_accuracy(model, loaders_val[t]))
 
-    if verbose: print("  [test after joint training]")
+    if verbose: print("  [After joint training]")
     for eval_id in range(_NUM_TASKS):
         model.set_task(eval_id)
-        wisdm_test.choose_subset(_TT[eval_id])
+        wisdm_test.choose_subset(task_pairs[eval_id])
         loader_test = DataLoader(wisdm_test, batch_size=batch_size,
                                  shuffle=False, drop_last=False)
         all_preds, all_labels = [], []
         model.eval()
         with torch.no_grad():
             for x, y in loader_test:
-                preds  = _forward_mh(model, x).argmax(dim=1).numpy()
+                x = x.to(device)
+                preds  = model(x).argmax(dim=1).cpu().numpy()
                 labels = y.numpy()
-                all_preds.extend(preds); all_labels.extend(labels)
-        all_preds  = np.array(all_preds)
+                all_preds.extend(preds)
+                all_labels.extend(labels)
         num_of_correct_predictions = 0
         num_of_samples = len(all_labels)
         for i in range(num_of_samples):
@@ -123,8 +134,13 @@ def run_joint_lstm_wisdm_mh(args, verbose = True):
 
     test_accs = [metrics.R[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]
     if verbose:
-        acc_final = float(np.mean(test_accs))
-        avg_kappa = float(np.mean([metrics.K[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]))
+        acc_final = 0.0
+        avg_kappa = 0.0
+        for j in range(_NUM_TASKS):
+            acc_final += test_accs[j]
+            avg_kappa += metrics.K[_NUM_TASKS-1].get(j, 0.0)
+        acc_final = float(acc_final / _NUM_TASKS)
+        avg_kappa = float(avg_kappa / _NUM_TASKS)
         print()
         print("  WISDM results  --  LSTM MH (Joint)  [oracle upper bound]")
         print("  NOTE: Only ACC_final and Cohen's kappa are valid for joint training.")

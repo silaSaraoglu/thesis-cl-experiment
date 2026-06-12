@@ -1,14 +1,36 @@
 """
 Shared utilities for single_head and multi_head experiments.
 """
+import os
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+
+# Load GIM paper permutation from the original repo (first of 10 pre-saved permutations).
+# The GIM paper permutes the 784 pixels with a fixed random shuffle. Here the permuted
+# pixels are reshaped back to (B, 28, 28) so every model keeps the 28-step x 28-feature
+# sequence format (input_size stays 28).
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isdir(os.path.join(_ROOT, 'repos')):
+    _ROOT = os.path.dirname(_ROOT)
+MNIST_PERM = torch.from_numpy(
+    np.load(os.path.join(_ROOT, 'repos', 'gim', 'tasks', 'mnist', 'permutations.npy'))[0]
+).long()
+
+
+def permute_mnist(x):
+    """Apply the GIM pixel permutation, keeping the (B, 28, 28) shape.
+
+    x: (B, 1, 28, 28) or (B, 28, 28) -> (B, 28, 28) with pixels shuffled by MNIST_PERM.
+    """
+    return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
 
 def collect_datasets(train_cl, test_cl, task_list, max_samples, batch_size=None, reshape=False):
     """Materialise train/val/test TensorDatasets for all tasks upfront.
 
-    reshape=True removes the channel dim: (B, 1, H, W) → (B, H, W) — H time steps × W features.
+    reshape=True  : permuted MNIST (B, 1, 28, 28) -> (B, 28, 28) — 28 steps x 28 features
+    reshape=False : no transformation (WISDM)
     """
     train_datasets, val_datasets, test_datasets = [], [], []
     for subset in task_list:
@@ -18,7 +40,7 @@ def collect_datasets(train_cl, test_cl, task_list, max_samples, batch_size=None,
             Xs, Ys = [], []
             for x, y in loader:
                 if reshape:
-                    x = x.squeeze(1)
+                    x = permute_mnist(x)
                 Xs.append(x)
                 Ys.append(y)
             store.append(TensorDataset(torch.cat(Xs), torch.cat(Ys)))
@@ -26,7 +48,7 @@ def collect_datasets(train_cl, test_cl, task_list, max_samples, batch_size=None,
         Xs, Ys = [], []
         for x, y in DataLoader(test_cl, batch_size=256, shuffle=False):
             if reshape:
-                x = x.squeeze(1)
+                x = permute_mnist(x)
             Xs.append(x)
             Ys.append(y)
         test_datasets.append(TensorDataset(torch.cat(Xs), torch.cat(Ys)))

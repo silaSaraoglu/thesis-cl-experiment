@@ -7,9 +7,13 @@ Used as the lower-bound comparison for GIM-LSTM.
 import os
 import sys
 import torch
+
+
+
 import torch.optim as optim
 import optuna
 import numpy as np
+from shared.utils import MNIST_PERM
 from torch.utils.data import DataLoader
 
 _p = os.path.dirname(os.path.abspath(__file__))
@@ -17,68 +21,79 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import MNIST_CL
+from shared.dataset_cl import MNIST_CL
 from tasks.mnist.utils_single import accuracy
-from utils.metrics import CLMetrics, cohen_kappa
-from models.LSTM.model import build_lstm, lstm_forward
+from shared.metrics import CLMetrics, cohen_kappa
+from models.LSTM.model import SingleHeadLSTM
 
-_TT        = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
+_TT = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
 _NUM_TASKS = 5
 
 # calculation is based on batch size considering last batch size may differ than others
+
+def _px(x):
+    # permuted MNIST from GIM paper, kept as (B,28,28)
+    return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
+
 def calculate_accuracy(model, loader):
     num_correct = 0.0
     num_total = 0
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = x.squeeze(1)
+            x = _px(x)
             batch_size = y.size(0)
-            num_correct =  num_correct + accuracy(lstm_forward(model, x), y) * batch_size
+            num_correct =  num_correct + accuracy(model(x), y) * batch_size
             num_total = num_total + batch_size
     return num_correct / num_total
 
 
 def run_naive_lstm_mnist_sh(args, verbose=True, trial=None):
     """Naive Single-Head LSTM on MNIST. Returns val_accs, test_accs, metrics, model, []."""
-    hidden_size   = args.hidden_size_rnn
-    batch_size    = args.batch_size
+    hidden_size = args.hidden_size_rnn
+    batch_size = args.batch_size
     learning_rate = args.learning_rate
-    data_dir      = args.data_dir
-    max_samples   = args.subset
-    image_size    = 28
-    epochs        = args.epochs
+    data_dir = args.data_dir
+    max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
+    image_size = 28
+    epochs = args.epochs
     max_grad_norm = 5.0
-    input_size    = image_size
-    output_size   = 2
+    input_size = image_size
+    output_size = 2
 
-    model     = build_lstm(input_size, hidden_size, output_size, batch_size)
+    model = SingleHeadLSTM(input_size, hidden_size, output_size, batch_size)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
 
     mnist_train = MNIST_CL(data_dir, download=False, train=True,
                            perc_val=0.25, batch_size=batch_size,
-                           output_size=output_size, image_size=image_size)
-    mnist_test  = MNIST_CL(data_dir, download=False, train=False,
-                           output_size=output_size, image_size=image_size)
+                           output_size=output_size)
+    mnist_test = MNIST_CL(data_dir, download=False, train=False,
+                           output_size=output_size)
+    mnist_train.set_holdout_config(
+        holdout_n = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout = getattr(args, "use_holdout", False),
+    )
 
-    metrics          = CLMetrics(num_tasks=_NUM_TASKS)
+    metrics = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
     for task_id in range(_NUM_TASKS):
-        mnist_train.choose_subset(_TT[task_id])
+        mnist_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
 
-        mnist_test.choose_subset(_TT[task_id])
+        mnist_test.choose_subset(task_pairs[task_id])
         loader_pt = DataLoader(mnist_test, batch_size=batch_size, shuffle=False, drop_last=False)
         metrics.record_pretrain(task_id, calculate_accuracy(model, loader_pt))
 
         for _ in range(epochs):
             model.train()
             for x, y in loader_train:
-                x = x.squeeze(1)
+                x = _px(x)
                 optimizer.zero_grad()
-                loss = criterion(lstm_forward(model, x), y)
+                loss = criterion(model(x), y)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
@@ -89,22 +104,27 @@ def run_naive_lstm_mnist_sh(args, verbose=True, trial=None):
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
-            mnist_test.choose_subset(_TT[eval_id])
+            mnist_test.choose_subset(task_pairs[eval_id])
             loader_test = DataLoader(mnist_test, batch_size=batch_size,
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
             model.eval()
             with torch.no_grad():
                 for x, y in loader_test:
-                    x = x.squeeze(1)
-                    preds  = lstm_forward(model, x).argmax(dim=1).numpy()
+                    x = _px(x)
+                    preds = model(x).argmax(dim=1).numpy()
                     labels = y.numpy()
                     all_preds.extend(preds)
                     all_labels.extend(labels)
-            all_preds  = np.array(all_preds)
+            all_preds = np.array(all_preds)
             all_labels = np.array(all_labels)
-            acc   = float((all_preds == all_labels).mean())
+            num_correct = 0
+            for i in range(len(all_preds)):
+                if all_preds[i] == all_labels[i]:
+                    num_correct += 1
+            acc = float(num_correct / len(all_labels))
             kappa = cohen_kappa(all_labels, all_preds)
             metrics.record(after_task=task_id, eval_task=eval_id, acc=acc)
             metrics.record_kappa(after_task=task_id, eval_task=eval_id, kappa=kappa)

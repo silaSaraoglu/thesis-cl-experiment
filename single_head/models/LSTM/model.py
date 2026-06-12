@@ -1,6 +1,3 @@
-"""
-Baseline LSTM classifier wrapping BaselineRNN from the GIM repository.
-"""
 import os
 import sys
 
@@ -9,17 +6,19 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from core.BaselineRNN import BaselineRNN 
-
-def build_lstm(input_size, hidden_size, output_size, batch_size):
-    return BaselineRNN(
-        input_size, hidden_size, output_size, 'cpu',
-        lstm=True, batch_size=batch_size, num_layers=1, orthogonal=False,
-    )
+from core.BaselineRNN import BaselineRNN
 
 
-def lstm_forward(model, x):
-    """Single forward pass: allocates hidden state, returns last-timestep logits (B, output_size)."""
-    hidden_state = model.reset_memory_state(batch_size=x.size(0))
-    _, out = model(x, hidden_state)
-    return out[:, -1, :]
+class SingleHeadLSTM(BaselineRNN):
+    """BaselineRNN with a standard forward(x) → logits interface (single shared head)."""
+
+    def __init__(self, input_size, hidden_size, output_size, batch_size):
+        super().__init__(
+            input_size, hidden_size, output_size, 'cpu',
+            lstm=True, batch_size=batch_size, num_layers=1, orthogonal=False,
+        )
+
+    def forward(self, x):
+        hidden_state = self.reset_memory_state(batch_size=x.size(0))
+        out, _       = self.rnn_module(x, hidden_state)
+        return self.linear(out[:, -1, :])

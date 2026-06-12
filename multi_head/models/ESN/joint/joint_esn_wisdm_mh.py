@@ -17,13 +17,27 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
-from utils.metrics import CLMetrics, cohen_kappa
-from models.multi_head_utils import MultiHeadESN, _predict_mh
+from shared.dataset_cl import WISDM_CL
+from shared.metrics import CLMetrics, cohen_kappa
+from models.ESN.multi_head_esn_model import MultiHeadESN
 from shared.utils import collect_datasets
 
 _TT        = [[0, 1], [2, 3], [4, 5]]
 _NUM_TASKS = 3
+
+def calculate_accuracy(model, loader):
+    num_correct = 0.0
+    num_total = 0
+    model.eval()
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(model.device)
+            preds = model(x).argmax(1).cpu()
+            for i in range(len(preds)):
+                if preds[i] == y[i]:
+                    num_correct += 1
+            num_total += y.size(0)
+    return num_correct / num_total
 
 def run_joint_esn_wisdm_mh(args, verbose = True):
     warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -32,15 +46,21 @@ def run_joint_esn_wisdm_mh(args, verbose = True):
     device      = args.device
     data_root   = args.data_dir
     max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
     batch_size  = args.batch_size
     epochs      = args.epochs
 
     wisdm_train = WISDM_CL(data_root, train=True,  download=False,
                          perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        wisdm_train, wisdm_test, _TT, max_samples, batch_size)
+        wisdm_train, wisdm_test, task_pairs, max_samples, batch_size)
 
     model = MultiHeadESN(input_size=3, args=args, device=device)
     criterion = nn.CrossEntropyLoss()
@@ -61,37 +81,34 @@ def run_joint_esn_wisdm_mh(args, verbose = True):
                                 shuffle=True, drop_last=False)
                      for t in range(_NUM_TASKS)]
 
-    for epoch in range(epochs):
+    for _ in range(epochs):
         all_batches = [(t, batch) for t in range(_NUM_TASKS) for batch in loaders_train[t]]
         random.shuffle(all_batches)
         model.train()
-        total_loss, n_batches = 0.0, 0
         for task_id, (x, y) in all_batches:
             model.set_task(task_id)
+            x = x.to(device)
+            y = y.to(device)
             opt.zero_grad()
-            loss = criterion(model(x), y)
-            loss.backward()
+            criterion(model(x), y).backward()
             opt.step()
-            total_loss += loss.item(); n_batches += 1
-        if verbose:
-            print(f"    epoch {epoch}/{epochs} | loss={total_loss/n_batches if n_batches else 0:.4f}")
 
     for t in range(_NUM_TASKS):
         model.set_task(t)
         loader_val = DataLoader(val_datasets[t], batch_size=batch_size, shuffle=False)
-        preds, labels = _predict_mh(model, loader_val)
-        num_of_correct_predictions = 0
-        num_of_samples = len(labels)
-        for i in range(num_of_samples):
-            if preds[i] == labels[i]:
-                num_of_correct_predictions += 1
-        subtask_val_accs.append(float(num_of_correct_predictions / num_of_samples))
+        subtask_val_accs.append(calculate_accuracy(model, loader_val))
 
-    if verbose: print("  [test after joint training]")
+    if verbose: print("  [After joint training]")
     for eval_id in range(_NUM_TASKS):
         model.set_task(eval_id)
         loader_te = DataLoader(test_datasets[eval_id], batch_size=batch_size, shuffle=False)
-        preds, labels = _predict_mh(model, loader_te)
+        preds, labels = [], []
+        model.eval()
+        with torch.no_grad():
+            for x, y in loader_te:
+                x = x.to(device)
+                preds.extend(model(x).argmax(1).cpu().numpy())
+                labels.extend(y.numpy())
         num_of_correct_predictions = 0
         num_of_samples = len(labels)
         for i in range(num_of_samples):
@@ -107,8 +124,13 @@ def run_joint_esn_wisdm_mh(args, verbose = True):
 
     test_accs = [float(metrics.R[_NUM_TASKS-1].get(j, 0.0)) for j in range(_NUM_TASKS)]
     if verbose:
-        acc_final = float(np.mean(test_accs))
-        avg_kappa = float(np.mean([metrics.K[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]))
+        acc_final = 0.0
+        avg_kappa = 0.0
+        for j in range(_NUM_TASKS):
+            acc_final += test_accs[j]
+            avg_kappa += metrics.K[_NUM_TASKS-1].get(j, 0.0)
+        acc_final = float(acc_final / _NUM_TASKS)
+        avg_kappa = float(avg_kappa / _NUM_TASKS)
         print()
         print("  WISDM results  --  ESN-Joint MH  [oracle upper bound]")
         print("  NOTE: Only ACC_final and Cohen's kappa are valid for joint training.")

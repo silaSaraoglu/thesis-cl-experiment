@@ -1,416 +1,338 @@
 # Thesis Project — Continual Learning Benchmark
 
-Comparative study of continual learning (CL) strategies under two evaluation settings:
-**Domain-Incremental Learning (DIL)** and **Task-Incremental Learning (TIL)**.
-Two model families are benchmarked — **GIM** (Growing and Interpolating Memory networks) and
-**ESN** (Echo State Networks) — across two datasets.
+A comparative study of continual learning (CL) strategies across three sequence
+datasets, evaluated under two settings — **Domain-Incremental Learning (DIL,
+`single_head/`)** and **Task-Incremental Learning (TIL, `multi_head/`)**.
 
----
+Every dataset is turned into a sequence of **binary classification tasks** presented
+one after another, so all model families (GIM, LSTM, ESN) see the same recurrent
+input format: `(batch, timesteps, features)`.
 
-## Table of Contents
+### Original repositories
 
-- [Continual Learning Settings](#continual-learning-settings)
-- [Datasets](#datasets)
-- [Models and Strategies](#models-and-strategies)
-- [Project Structure](#project-structure)
-- [How to Run](#how-to-run)
-- [Tuning and Evaluation Pipeline](#tuning-and-evaluation-pipeline)
-- [Metrics](#metrics)
-- [Key Design Decisions](#key-design-decisions)
-- [Dependencies](#dependencies)
+The two model families are built on top of their authors' original codebases (vendored
+under `repos/`, lightly adapted for this thesis):
 
----
-
-## Continual Learning Settings
-
-Three standard CL settings exist, ordered from hardest to easiest:
-
-| Setting | Abbrev. | Task ID at test | Output head | Challenge |
-|---------|---------|-----------------|-------------|-----------|
-| Class-Incremental | CIL | Not provided | Single head, grows with classes | Must distinguish all seen classes; random chance degrades each task |
-| Domain-Incremental | DIL | Not provided | Single head, fixed output space | Must not forget previous tasks; same output space throughout |
-| Task-Incremental | TIL | Provided (oracle) | Separate head per task | Largely trivial with frozen features — serves as upper bound |
-
-> **Note for supervisor:** The original ESN repository (ESANN 2021) operates in the **CIL**
-> setting — a single 10-class output head, no task identity provided, new digit classes
-> introduced each experience (`nc_benchmark(..., task_labels=False)`). This is the hardest
-> of the three settings. Our thesis adapts the ESN to **DIL** (`single_head/`) and **TIL**
-> (`multi_head/`) to benchmark it on the same footing as GIM, which was originally designed
-> for the DIL setting.
->
-> **How the adaptation was made:**
->
-> | Dimension | Original ESN (CIL) | Our adaptation |
-> |-----------|-------------------|----------------|
-> | Task structure | 5 experiences, 2 new digit classes added each time | 5 binary tasks (0vs1, 2vs3, …) — classes fixed per task, no new classes introduced |
-> | Output head | Single 10-class linear readout | SH: single 2-class readout shared across tasks · MH: one independent 2-class readout per task (`MultiHeadESN`) |
-> | Task ID at test | Not provided | SH: not provided (DIL) · MH: provided as oracle (TIL) |
-> | Sequence format | 28 timesteps × 28 features (one full pixel row per step) | 28 timesteps × 28 features (one pixel row per step, full 28×28 image) — same as original ESN format |
-> | Second dataset | Not present (MNIST + SSC only) | WISDM added: 3 binary tasks, 128 timesteps × 3 accelerometer channels |
-> | Reservoir hyperparams | Tuned via grid search (spectral radius, input scaling, leaky) | Fixed to original paper values (0.99 / 1.0 / 1.0) — not re-tuned |
-> | Training hyperparams | Fixed in config (lr=1e-3, units=500, epochs=10, batch=128) | Re-tuned per dataset via Optuna TPE (task structure and sequence length differ) |
->
-> The reservoir itself (`DeepReservoirClassifier`) is used unchanged from the original
-> repository. Only the task-splitting logic, output head structure, and training loop
-> wrapper are new.
-
-### Setting 1 — Domain-Incremental Learning (DIL) · `single_head/`
-
-The model has a **single shared output head** for all tasks. At test time, **no task identity
-is provided** — the model must classify correctly without knowing which task it is on.
-
-- GIM routes inputs to the correct module using **autoencoder reconstruction error** (the module
-  with the lowest reconstruction error on the input is selected).
-- ESN uses a single readout layer updated incrementally across tasks.
-- Catastrophic forgetting is the key challenge.
-
-### Setting 2 — Task-Incremental Learning (TIL) · `multi_head/`
-
-The model has **one output head per task** stored in a `ModuleDict`. At test time, the
-**oracle task label** (ground truth from the dataset) is provided, and the correct head is
-selected automatically.
-
-- GIM routes inputs using the ground-truth task index — autoencoders are **not** trained or used.
-- ESN SLDA fits one independent `LinearDiscriminantAnalysis` per task (batch, offline).
-- Because heads are separate, there is no cross-task interference; catastrophic forgetting
-  is largely eliminated by design. For ESN specifically, the frozen reservoir means there are
-  **no shared mutable parameters across tasks** — TIL performance is the theoretical ceiling.
+- **GIM** — Gated Incremental Memory:
+  [AndreaCossu/ContinualLearning-SequentialProcessing](https://github.com/AndreaCossu/ContinualLearning-SequentialProcessing)
+  · Cossu et al., *Continual Learning with Gated Incremental Memories for Sequential
+  Data Processing*, IJCNN 2020 ([arXiv:2004.04077](https://arxiv.org/abs/2004.04077))
+- **ESN** — Echo State Networks:
+  [Pervasive-AI-Lab/ContinualLearning-EchoStateNetworks](https://github.com/Pervasive-AI-Lab/ContinualLearning-EchoStateNetworks)
+  · Cossu et al., *Continual Learning with Echo State Networks*, ESANN 2021
+  ([arXiv:2105.07674](https://arxiv.org/abs/2105.07674))
 
 ---
 
 ## Datasets
 
-### MNIST
+Three datasets are used. Each is split into a fixed number of **binary tasks**, and
+within every task the two raw class labels are remapped to `{0, 1}`.
 
-Split into **5 sequential binary tasks**:
+| Dataset | Domain | # Tasks | Classes | Train total | Test total | Input shape (T × F) |
+|---------|--------|:-------:|:-------:|:-----------:|:----------:|:-------------------:|
+| **MNIST** | Handwritten digits (image → sequence) | 5 | 10 digits | 60,000 | 10,000 | 28 × 28 |
+| **WISDM** | Smartphone accelerometer (HAR) | 3 | 6 activities | 1,866 | 828 | 200 × 3 |
+| **UWave** | Wiimote accelerometer (gestures) | 4 | 8 gestures | 896 | 3,582 | 315 × 3 |
 
-| Task | Classes |
-|------|---------|
-| 1 | 0 vs 1 |
-| 2 | 2 vs 3 |
-| 3 | 4 vs 5 |
-| 4 | 6 vs 7 |
-| 5 | 8 vs 9 |
-
-Full 28×28 images are used (no downsampling). Each image is fed to the model as a
-**row-based sequence** — one pixel row per timestep, giving 28 timesteps with 28 features
-each:
-
-```
-Pixel grid (28×28):          Sequence fed to model:
-┌──────────────────────────┐
-│ p1   p2  ...  p28   row1 │         t=1  → model ← [p1, p2, ..., p28]   (28-dim vector)
-│ p29  p30 ...  p56   row2 │  →→→   t=2  → model ← [p29, p30, ..., p56]
-│ ...                      │         ...
-└──────────────────────────┘         t=28 → model ← [p757, ..., p784]
-```
-
-At each step the model processes one full row of pixels (28 features), updating its hidden
-state with the accumulated spatial context. Only the **final hidden state** (after row 28)
-is passed to the output head for classification.
-
-This row-based format (`input_size=28`, 28 timesteps) is the standard sequential MNIST
-convention from the original ESN repository. It provides each timestep with meaningful
-spatial context (a full image row) rather than a single pixel, making the sequence
-structurally richer and more learnable for both LSTM and ESN models.
-
-### WISDM — Wireless Sensor Data Mining
-
-6 smartphone accelerometer activities split into **3 sequential binary tasks**:
-
-| Task | Classes | Activity type |
-|------|---------|---------------|
-| 1 | Walking vs Jogging | locomotion vs locomotion |
-| 2 | Upstairs vs Downstairs | directional locomotion |
-| 3 | Sitting vs Standing | static vs static |
-
-Input shape: `(B, 128, 3)` — 128 time steps, 3 accelerometer channels (x, y, z).
-Labels are remapped to `{0, 1}` per task.
-
-Data is stored under `data/wisdm/`. The preprocessed file `wisdm_processed.npz` is
-generated automatically on first run (z-score normalised using training statistics).
+Defined in [repos/gim/tasks/dataset_cl.py](repos/gim/tasks/dataset_cl.py); task counts
+and names are registered in [single_head/run_experiment.py](single_head/run_experiment.py#L284-L288).
 
 ---
 
-## Models and Strategies
+### MNIST — 5 tasks (digit pairs)
 
-### GIM — Growing and Interpolating Memory
+The standard 60,000 / 10,000 train/test split is grouped into **5 binary tasks**, one
+per digit pair. Default pairing (`config_1`):
 
-Based on the [GIM repository](repos/gim/). Uses adaptive LSTM (`ALSTM`) as the recurrent body.
-New modules are grown when validation accuracy on the current task falls below a threshold.
+| Task | Classes | Train | Test |
+|:----:|:-------:|:-----:|:----:|
+| 1 | 0 vs 1 | 12,665 | 2,115 |
+| 2 | 2 vs 3 | 12,089 | 2,042 |
+| 3 | 4 vs 5 | 11,263 | 1,874 |
+| 4 | 6 vs 7 | 12,183 | 1,986 |
+| 5 | 8 vs 9 | 11,800 | 1,983 |
+| **Total** | | **60,000** | **10,000** |
 
-| Variant | SH (DIL) | MH (TIL) |
-|---------|-----------|-----------|
-| GIM-ALSTM | AE routing | Oracle routing |
-| LSTM Naive | Single shared head | Per-task heads |
-| LSTM Joint | All tasks simultaneously (upper bound) | All tasks simultaneously (upper bound) |
+- **Class balance:** near-balanced within each task (digit counts range 5,421–6,742
+  in train), so no resampling is applied.
+- **Per-task size:** all tasks are roughly equal (~11–13k train each).
 
-> **Joint training is not applicable to GIM.** GIM's autoencoder-driven module-growing
-> mechanism is inherently sequential — it decides whether to grow a new module based on
-> reconstruction error from the *current* task. When all tasks are presented simultaneously
-> this decision criterion becomes undefined, so there is no meaningful joint-training variant.
-> Joint LSTM is included as an oracle upper bound for the vanilla LSTM baseline only.
+**Task configurations.** To remove the effect of *which* digits are paired, MNIST is
+run with three pairings and the results are averaged
+([run_experiment.py:83-87](single_head/run_experiment.py#L83-L87)):
 
-### ESN — Echo State Network
+| Config | T1 | T2 | T3 | T4 | T5 |
+|--------|----|----|----|----|----|
+| `config_1` | 0/1 | 2/3 | 4/5 | 6/7 | 8/9 |
+| `config_2` | 1/2 | 3/4 | 5/6 | 7/8 | 0/9 |
+| `config_3` | 0/3 | 2/5 | 4/7 | 6/9 | 8/1 |
 
-Based on the [ESN + Avalanche repository](repos/esn/). Uses a **frozen deep reservoir**
-(`DeepReservoirClassifier`) as a fixed feature extractor. Only the readout layer is trained.
+#### Preprocessing & permutation
 
-#### Single-Head (DIL) ESN strategies
+1. **Source.** Loaded via `torchvision.datasets.MNIST` (`MNIST_CL` subclass), with
+   `ToTensor()` scaling pixels to `[0, 1]`. No downsampling — full 28×28 images.
+2. **Fixed pixel permutation.** Every image is shuffled by a **single fixed
+   permutation of the 784 pixels**, taken from the original GIM paper
+   (`permutations.npy[0]`). This is *not* a different permutation per task — it is one
+   global shuffle applied identically to all images, reproducing the GIM
+   "permuted-MNIST" protocol. The permuted pixels are then reshaped **back to 28×28**,
+   so the sequence format is preserved (`shared/utils.py::permute_mnist`,
+   [utils.py:21-26](shared/utils.py#L21-L26)).
+3. **Row-as-timestep sequence.** The 28×28 image is fed as a sequence of **28
+   timesteps × 28 features** (`input_size=28`) — one full pixel row per step. Only the
+   final hidden state is classified.
 
-| Variant | Description |
-|---------|-------------|
-| Naive | No CL strategy — shared readout trained sequentially |
-| EWC | Elastic Weight Consolidation on the readout weights |
-| LwF | Learning without Forgetting — distillation from previous task outputs |
-| Replay | Experience replay buffer |
-| SLDA | StreamingLDA — incremental LDA classifier on reservoir features |
-| Joint | All tasks simultaneously (oracle upper bound) |
+```
+28×28 image (after fixed permutation)        sequence to the model
+┌────────────────────────────┐
+│  row 0  →  [p0 … p27]       │   t=0  →  [28-dim row vector]
+│  row 1  →  [p28 … p55]      │   t=1  →  [28-dim row vector]
+│   …                         │   …
+│  row 27 →  [p756 … p783]    │   t=27 →  [28-dim row vector]
+└────────────────────────────┘
+```
 
-#### Multi-Head (TIL) ESN strategies
+The same permutation + reshape is applied identically by every MNIST model — GIM, LSTM
+(naive/joint/replay), and ESN — so all models train on the exact same inputs.
 
-| Variant | Description |
-|---------|-------------|
-| Naive | No CL strategy — per-task independent readout heads |
-| Joint | All tasks simultaneously (oracle upper bound) |
+#### Relation to the original GIM / ESN papers (and why we re-tune)
 
-> **Multi-head ESN CL strategies (EWC/LwF/Replay) are architecturally vacuous** and are
-> therefore not included in the MH pipeline. The ESN reservoir (`DeepReservoir`) has all
-> weights registered as `nn.Parameter(..., requires_grad=False)` in the original repository
-> — it is frozen by design and cannot learn or forget anything. In the multi-head setting
-> each task gets its own independent `nn.Linear` head, and only that head's parameters are
-> passed to the optimizer when training on that task. Once a task is done its head is never
-> touched again. The result is that there are **no shared mutable parameters across tasks**:
-> EWC has no Fisher information to compute, LwF has no shared output to distil from, and
-> Replay cannot influence a body that does not change. The MH Naive baseline already captures
-> the ceiling performance for this architecture.
+This MNIST setup borrows from two sources but matches neither exactly:
+
+- The **GIM paper** uses *permuted MNIST* fed pixel-by-pixel (784 steps). We keep its
+  fixed pixel permutation but reshape to 28×28, so the sequence is 28 steps × 28
+  features.
+- The **ESN paper** uses *Split MNIST* fed one **natural (unpermuted) row** at a time, as
+  a **class-incremental** 10-way problem. We instead present **binary** tasks
+  (Domain-Incremental in `single_head/`, Task-Incremental in `multi_head/`).
+
+Because both the input ordering (permuted vs natural) and the CL scenario differ from
+those papers, the per-strategy hyperparameters in the original ESN configs
+([repos/esn/CONFIGS/smnist_28/](repos/esn/CONFIGS/smnist_28)) are used only as a loose
+reference, not copied. Every `(model, dataset)` configuration is tuned independently with
+Optuna — including the ESN CL knobs `ewc_lambda`, `lwf_alpha`, and `lwf_temperature` — so
+no hard-coded strategy default is carried over. Replay sizes its memory from the data
+(10% of each task's training set) rather than from a fixed constant.
 
 ---
 
-## Project Structure
+### WISDM — 3 tasks (activity pairs)
 
-```
-thesis_project/
-├── README.md
-│
-├── shared/                             # Canonical utilities shared by both settings
-│   └── utils.py                        # collect_datasets(), gim_predict()
-│
-├── single_head/                        # Setting 1 — DIL
-│   ├── run_experiment.py               # Optuna tuning + multi-run evaluation orchestrator
-│   ├── run_overnight_sh.py             # Launches run_experiment.py as a background daemon
-│   ├── utils/
-│   │   └── metrics.py                  # CLMetrics, cohen_kappa, save_results
-│   └── models/
-│       ├── GIM_LSTM/                   # GIM-ALSTM experiments
-│       │   ├── gim_lstm_mnist_sh.py
-│       │   └── gim_lstm_wisdm_sh.py
-│       ├── LSTM/                       # Vanilla LSTM baselines
-│       │   ├── model.py                # build_lstm() factory
-│       │   ├── naive/
-│       │   │   ├── naive_lstm_mnist_sh.py
-│       │   │   └── naive_lstm_wisdm_sh.py
-│       │   └── joint/
-│       │       ├── joint_lstm_mnist_sh.py
-│       │       └── joint_lstm_wisdm_sh.py
-│       └── ESN/
-│           ├── esn_utils.py            # build_model(), predict_step()
-│           ├── naive/
-│           ├── joint/
-│           ├── ewc/
-│           ├── lwf/
-│           ├── replay/
-│           └── slda/
-│
-├── multi_head/                         # Setting 2 — TIL
-│   ├── run_experiment.py               # Same structure as SH orchestrator
-│   ├── run_overnight_mh.py
-│   ├── utils/
-│   │   └── metrics.py
-│   └── models/
-│       ├── multi_head_utils.py         # MultiHeadLSTM, MultiHeadESN, _forward_mh, _predict_mh
-│       ├── GIM_LSTM/                   # GIM-ALSTM experiments
-│       │   ├── gim_lstm_mnist_mh.py
-│       │   └── gim_lstm_wisdm_mh.py
-│       ├── LSTM/                       # Vanilla LSTM baselines
-│       │   ├── naive/
-│       │   │   ├── naive_lstm_mnist_mh.py
-│       │   │   └── naive_lstm_wisdm_mh.py
-│       │   └── joint/
-│       │       ├── joint_lstm_mnist_mh.py
-│       │       └── joint_lstm_wisdm_mh.py
-│       └── ESN/
-│           ├── naive/
-│           └── joint/
-│
-├── repos/
-│   ├── gim/                            # Original GIM codebase (unmodified)
-│   └── esn/                            # Original ESN + Avalanche codebase (unmodified)
-│
-├── data/
-│   ├── mnist/                          # Auto-downloaded by torchvision
-│   └── wisdm/                          # WISDM Dataset + wisdm_processed.npz
-│
-└── results/
-    ├── single_head/
-    │   └── experiment_YYYYMMDD_HHMMSS/ # One folder per run
-    │       ├── {model}_{dataset}.json  # Per-combination results
-    │       ├── plots/                  # PNG metric charts and R-matrix heatmaps
-    │       └── summary.json            # Aggregated results for all combinations
-    └── multi_head/
-        └── experiment_YYYYMMDD_HHMMSS/
-```
+Wireless Sensor Data Mining accelerometer dataset (`WISDM_ar_v1.1`). 6 activities are
+paired into **3 binary tasks** by motion category:
+
+| Task | Classes | Train | Test |
+|:----:|:-------:|:-----:|:----:|
+| 1 | Walking vs Jogging   | 622 | 276 |
+| 2 | Upstairs vs Downstairs | 622 | 276 |
+| 3 | Sitting vs Standing  | 622 | 276 |
+| **Total** | | **1,866** | **828** |
+
+- **Class balance:** every class is downsampled to the smallest class count, giving
+  **exactly 311 train / 138 test samples per class** (perfectly balanced). All three
+  tasks are therefore equal in size.
+
+**Task configurations.** Same three activity pairs in three presentation orders,
+averaged ([run_experiment.py:90-94](single_head/run_experiment.py#L90-L94)):
+
+| Config | T1 | T2 | T3 |
+|--------|----|----|----|
+| `config_1` | Walk/Jog | Up/Down | Sit/Stand |
+| `config_2` | Walk/Jog | Sit/Stand | Up/Down |
+| `config_3` | Up/Down | Walk/Jog | Sit/Stand |
+
+#### Preprocessing
+
+Run automatically on first use; the result is cached to
+`data/wisdm/wisdm_processed.npz` (`_wisdm_preprocess`,
+[dataset_cl.py:131-206](repos/gim/tasks/dataset_cl.py#L131-L206)):
+
+1. **Parse** the raw text file (`user_id, activity, x, y, z` per line); only the 6
+   mapped activities are kept.
+2. **Sliding windows** per `(user, activity)`: window length **200** (10 s at 20 Hz),
+   stride **100** (50% overlap). Each window → one sample of shape `(200, 3)`. The
+   200-step / 50%-overlap setting follows the continual-learning HAR convention of
+   Azghan et al. (*Gated Adaptation for Continual Learning in HAR*, arXiv:2603.10046).
+3. **User-disjoint split:** the first **80% of users** form the train set, the rest the
+   test set (windows never leak a user across the split).
+4. **Class balancing:** every class is downsampled to the smallest class count
+   (seed 0), so the binary tasks are equal in size.
+5. **Z-score normalisation** per channel, using **train statistics only**.
 
 ---
 
-## How to Run
+### UWave — 4 tasks (gesture pairs)
 
-### Overnight pipeline (recommended)
+UWave Gesture Library (UEA "All" variant). 8 gestures paired into **4 binary tasks**:
 
-Launches the full experiment suite as a background daemon with its own log file:
+| Task | Classes | Train | Test |
+|:----:|:-------:|:-----:|:----:|
+| 1 | G1 vs G2 | 230 | 889 |
+| 2 | G3 vs G4 | 216 | 904 |
+| 3 | G5 vs G6 | 238 | 882 |
+| 4 | G7 vs G8 | 212 | 907 |
+| **Total** | | **896** | **3,582** |
 
-```powershell
-# Single-head (DIL) — runs all model-dataset combinations
-cd single_head
-python run_overnight_sh.py
+- **Class balance:** near-balanced within each task (per-class train counts 100–127).
+- **Inverted train/test ratio:** the archive ships **far more test than train**
+  (~900 vs ~220 per task). This is the fixed UEA split and is kept as-is.
+- **Difficulty varies by pair**, so task order matters — hence multiple orderings.
 
-# Multi-head (TIL) — same structure
-cd multi_head
-python run_overnight_mh.py
-```
+**Task configurations.** Same four pairs, three orders, averaged. The code treats
+G1/G2 and G7/G8 as the *hard* pairs and G3/G4, G5/G6 as the *easy* ones
+([run_experiment.py:97-102](single_head/run_experiment.py#L97-L102)):
 
-Each overnight script prints the log path and PID on startup:
+| Config | T1 | T2 | T3 | T4 | Order |
+|--------|----|----|----|----|-------|
+| `config_1` | G3/G4 | G5/G6 | G1/G2 | G7/G8 | easy → hard |
+| `config_2` | G7/G8 | G1/G2 | G5/G6 | G3/G4 | reverse |
+| `config_3` | G1/G2 | G3/G4 | G7/G8 | G5/G6 | alternating |
 
-```
-Single-Head (DIL) experiment started — safe to close this terminal.
-  PID     : 1234
-  Log     : single_head/logs/overnight_sh_YYYYMMDD_HHMMSS.log
-  Monitor : Get-Content -Wait 'single_head/logs/overnight_sh_....log'
-  Stop    : Stop-Process -Id 1234
-```
+#### Preprocessing
 
-### Direct invocation
+Run automatically on first use; cached to `data/uwave/uwave_processed.npz`
+(`_uwave_preprocess`, [dataset_cl.py:335-384](repos/gim/tasks/dataset_cl.py#L335-L384)):
 
-```powershell
-# Run full pipeline (tuning + evaluation) with optional overrides
-python single_head/run_experiment.py
-python single_head/run_experiment.py --n_trials 5 --tune_subset 100
-python single_head/run_experiment.py --num_runs 3 --subset 500
-```
-
----
-
-## Tuning and Evaluation Pipeline
-
-Each model-dataset combination goes through a two-phase pipeline inside `run_experiment.py`:
-
-### Phase 1 — Hyperparameter tuning (Optuna TPE)
-
-- `N_TRIALS = 10` trials per study (GIM, LSTM, Joint-LSTM, ESN-Base, Joint-ESN)
-- `N_STRATEGY_TRIALS = 5` trials for ESN strategy-specific studies (EWC/LwF/Replay — fewer
-  parameters to tune)
-- `TUNE_SUBSET_MNIST = 500` samples per task during MNIST tuning
-- `TUNE_SUBSET_WISDM = 500` samples per task during WISDM tuning
-- Up to 4 parallel workers (Phase 1a: independent studies; Phase 1b: ESN secondary studies
-  that depend on ESN-Base results)
-- GIM on MNIST uses fixed original-paper hyperparameters (not tuned)
-- ESN strategies (EWC/LwF/Replay) share the ESN-Base reservoir parameters and only tune
-  their strategy-specific extras
-
-#### MNIST search spaces
-
-| Model | hidden_size / esn_units | epochs | batch_size |
-|-------|------------------------|--------|------------|
-| LSTM Naive | [64, 128, 256] | 3–7 | [32, 64, 128] |
-| LSTM Joint | [64, 128, 256] | 2–5 | [32, 64, 128] |
-| ESN | [200, 500, 1000] | 2–5 | [32, 64, 128] |
-
-#### WISDM search spaces
-
-| Model | hidden_size / esn_units | epochs | batch_size |
-|-------|------------------------|--------|------------|
-| LSTM Naive | [32, 64, 128, 256] | 3–7 | [16, 32, 64] |
-| LSTM Joint | [32, 64, 128, 256] | 3–7 | [16, 32, 64] |
-| ESN | [100, 200, 500] | 3–7 | [16, 32, 64] |
-| GIM | [32, 64, 128] (rnn) | 3–7 | [16, 32, 64] |
-
-### Phase 2 — Multi-run evaluation
-
-- `SUBSET_MNIST = 5000` samples per task for full MNIST runs
-- `SUBSET_WISDM = 2000` samples per task for full WISDM runs
-- `NUM_RUNS = 1` full evaluation run with best hyperparameters
-- Results for all combinations saved to a single timestamped `experiment_YYYYMMDD_HHMMSS/`
-  folder containing individual JSONs, plots, and a `summary.json`
+1. **Parse** the UEA `.ts` files (`_TRAIN.ts` / `_TEST.ts`).
+2. **Reshape from univariate to triaxial:** the "All" variant stores each gesture as a
+   univariate series of length **945 = 315 × 3** (X, then Y, then Z concatenated). It is
+   reshaped back to `(315, 3)` so the input matches the WISDM convention
+   (`input_size=3`).
+3. **Z-score normalisation** per channel, using **train statistics only**.
 
 ---
 
-## Metrics
+### Train / validation / tuning splits (all datasets)
 
-Implemented in `utils/metrics.py` (both SH and MH). All metrics are computed from the
-accuracy matrix `R` where `R[i][j]` = test accuracy on task `j` after training on task `i`.
+Applied at load time, per task, inside each `*_CL` dataset class:
 
-| Metric | Formula | Meaning |
-|--------|---------|---------|
-| **ACC_final** | mean of last row of R | Average accuracy after all tasks |
-| **ACC_avg** | mean of lower-left triangle of R | Average accuracy over all evaluation points |
-| **BWT_final** | mean of `R[N-1][j] - R[j][j]` for j < N-1 | Backward transfer (forgetting) after all tasks |
-| **BWT_avg** | mean of `R[i][j] - R[j][j]` for i > j | Average backward transfer |
-| **FWT** | mean of `R[i-1][i] - baseline[i]` | Forward transfer (zero-shot to next task) |
-| **Cohen's κ** | mean κ on final model across all tasks | Agreement beyond chance |
-| **Plasticity** | mean of diagonal of R | How well each task is learned right after training |
-| **Stability** | mean of `R[N-1][j]` for all j | How well all tasks are retained at the end |
+- **Tuning holdout (fixed seed `TUNE_SPLIT_SEED = 0`).** A fixed slice of each task's
+  training data is reserved as a holdout pool used **only** for Optuna hyperparameter
+  search: 1,200 samples/task for MNIST, 62 for WISDM, 22 for UWave (~10% each,
+  [run_experiment.py:126-129](single_head/run_experiment.py#L126-L129)). Final training
+  runs use everything *outside* the holdout.
+- **Validation split.** The remaining training data is split into train/val (val
+  fraction 20% for MNIST, 25% for WISDM/UWave), stratified by label.
+- **Test set.** The held-out test split is fixed and used after every task to fill the
+  accuracy matrix `R` that all CL metrics are computed from.
 
 ---
 
-## Key Design Decisions
+## Single-Head (DIL) Models
 
-### WISDM task pairing
-Activities are paired within similar motion categories: Walking/Jogging (both locomotion),
-Upstairs/Downstairs (directional locomotion), Sitting/Standing (both static). Each task is a
-binary classification problem with labels remapped to `{0, 1}`.
+In the single-head / Domain-Incremental setting, every model has **one shared 2-class
+output head** used for all tasks, and **no task ID is given at test time**. Tasks are
+presented sequentially; after each task the model is evaluated on all tasks seen so far
+to fill the accuracy matrix `R`. Files live under [single_head/models/](single_head/models/).
 
-### `shared/utils.py`
-All utilities shared between `single_head/` and `multi_head/` live in `shared/utils.py`:
-- `collect_datasets(train_cl, test_cl, task_list, max_samples, batch_size, reshape)` —
-  materialises `TensorDataset` objects for all tasks upfront. Used by all ESN files.
-  `reshape=True` removes the channel dim `(B, 1, H, W) → (B, H, W)` for MNIST sequences.
-- `gim_predict(train_models, x, task_id)` — one forward pass through the GIM-ALSTM model,
-  returning predicted class labels.
+### LSTM (baseline family)
 
-### GIM autoencoders in SH vs MH
-- **SH**: Autoencoders are trained every epoch and used at test time to route inputs to
-  the module with the lowest reconstruction error (unsupervised module selection).
-- **MH**: Autoencoders are allocated by the model factory but never trained and never
-  used — the oracle task label provides routing directly.
+A plain single-layer LSTM with one shared linear readout
+([SingleHeadLSTM](single_head/models/LSTM/model.py), wrapping the GIM repo's
+`BaselineRNN`). The sequence's **final hidden state** is fed to the readout. Trained
+with Adam + cross-entropy and gradient clipping (max-norm 5.0). Three variants:
 
-### ESN SLDA in SH vs MH
-- **SH**: One `StreamingLDA` classifier updated incrementally across all tasks (no task
-  boundary information used).
-- **MH**: One independent `sklearn.LinearDiscriminantAnalysis` fitted per task after
-  extracting all reservoir features for that task (offline batch fit, oracle task ID used
-  at test time).
+| Variant | What it does | Role |
+|---------|--------------|------|
+| **Naive** ([naive/](single_head/models/LSTM/naive/)) | One LSTM trained sequentially over all tasks, no CL mechanism | Lower bound — shows raw catastrophic forgetting |
+| **Replay** ([replay/](single_head/models/LSTM/replay/)) | Naive LSTM + an experience-replay buffer (see below) | Rehearsal baseline |
+| **Joint** ([joint/](single_head/models/LSTM/joint/)) | One LSTM trained on **all tasks at once** (`ConcatDataset`) | Oracle upper bound (no task boundaries → no forgetting). Only `Acc_final` and Cohen's κ are meaningful |
 
-### Joint training as oracle upper bound
-Joint training (all tasks simultaneously) serves as the oracle upper bound for vanilla LSTM
-and ESN models. It is not applicable to GIM because GIM's module-growing criterion depends
-on sequential task presentation.
+### GIM — Gated Incremental Memory
 
-### Val/test loader shuffle
-Validation and test `DataLoader` objects always use `shuffle=False`. Only training loaders
-use `shuffle=True`. This is consistent across all model files in both SH and MH.
+[GIM_LSTM/](single_head/models/GIM_LSTM/) runs the **original GIM repo code unmodified**
+(`CL_Experiment`, `train`, `test`, autoencoders). We use the **ALSTM** variant: each
+*module* is an LSTM, and the architecture **grows one module per task**.
+
+- **Module growing:** after each task a new module is added (growth threshold `1.01`, so
+  growth always fires) — past modules are frozen, so old knowledge is structurally
+  protected.
+- **Test-time routing (the key idea):** since no task ID is given, GIM trains **one
+  autoencoder per task** and routes each test input to the module whose autoencoder gives
+  the **lowest reconstruction error**; that module then classifies via `gim_predict`.
+- **No joint variant:** the growth criterion depends on sequential task presentation, so
+  joint training is undefined for GIM — the LSTM-Joint serves as the shared upper bound.
+
+GIM is the main "method" under study; Naive-LSTM (lower bound) and Joint-LSTM (upper
+bound) bracket its performance.
+
+### ESN — Echo State Network (+ CL strategies)
+
+[ESN/](single_head/models/ESN/) wraps the ESN repo's `DeepReservoirClassifier`
+([SingleHeadESN](single_head/models/ESN/esn_utils.py)): a **frozen random reservoir**
+(units tuned; `spectral_radius=0.99`, `leaky=1.0`, `input_scaling=1.0`, 1 layer) acts as
+a fixed feature extractor — **only the readout is trained**. The reservoir hyper-params
+are fixed to the paper's values; only training/readout params are tuned. CL strategies
+(via the ESN repo's `get_strategy`, Avalanche-backed):
+
+| Strategy | Mechanism |
+|----------|-----------|
+| **Naive** | Shared readout trained sequentially, no protection (lower bound) |
+| **EWC** | Elastic Weight Consolidation: Fisher-weighted quadratic penalty on readout weights (`ewc_mode='separate'`, `ewc_lambda` tuned) |
+| **LwF** | Learning without Forgetting: knowledge distillation from the previous model's softened outputs (`lwf_alpha`, `lwf_temperature` tuned) |
+| **Replay** | Avalanche experience replay buffer (see below) |
+| **SLDA** | StreamingLDA on reservoir features: `ESNWrapper` extracts the final reservoir state, one **shared** LDA (means + covariance, shrinkage `1e-4`) updated incrementally — no gradients, no task ID |
+| **Joint** | Readout trained on all tasks at once — oracle upper bound (only `Acc_final`/κ valid) |
+
+> Because the reservoir is frozen, all forgetting in the ESN happens in the small readout
+> only, which makes EWC/LwF exact and cheap.
+
+### How Replay differs: LSTM vs ESN
+
+Both store a small memory of past samples and rehearse it, but the implementations differ:
+
+- **LSTM Replay** ([replay_lstm_mnist_sh.py](single_head/models/LSTM/replay/replay_lstm_mnist_sh.py)) — **hand-rolled**. A per-task buffer holds a balanced quota of `mem_size // num_tasks` examples (random subsample) from each past task. When training task *t*, the current task's data is **concatenated** with the entire buffer into one dataset and trained jointly. `mem_size` ≈ 10% of the total training data (`len(first_task) × num_tasks × 0.1`).
+- **ESN Replay** ([replay_esn_mnist_sh.py](single_head/models/ESN/replay/replay_esn_mnist_sh.py)) — uses **Avalanche's `ReplayPlugin`** through `get_strategy(strategy='replay')`. The buffer is maintained by **reservoir sampling** and **mixed into every minibatch** during training (rather than concatenated once per task). `mem_size = Σ (10% of each task's training set)`. Replay only updates the readout, since the reservoir is frozen.
+
+So the **memory budget is comparable (~10% of the data)**, but LSTM replay does explicit per-task balanced storage + one-shot concatenation, whereas ESN replay delegates to Avalanche's reservoir-sampled, per-batch rehearsal.
+
+> **Joint training = replay with an unlimited buffer.** The **Joint** variants
+> (LSTM-Joint, ESN-Joint) are conceptually the limiting case of replay: instead of
+> rehearsing a small ~10% memory of past tasks, they train on **100% of every task's data
+> at once**. There is no forgetting because nothing is ever "past" — all tasks are present
+> in every batch. This is exactly why Joint is the **oracle upper bound** for the
+> rehearsal family: Replay approximates Joint with a tiny, sampled memory, and Joint is
+> what Replay would converge to if the buffer held the entire dataset. (Only `Acc_final`
+> and Cohen's κ are meaningful for Joint, since BWT/FWT need a task order that joint
+> training removes.)
+
+### Model & training differences at a glance
+
+The shared scaffolding is identical across every model: same permuted-MNIST / windowed
+sensor input, same per-task loop, same `R`-matrix evaluation, the same tuned holdout
+split, and a 2-class shared head. What differs is **which parameters update** and **how
+the loss/teacher is formed**:
+
+| Model | Trainable parameters | Optimizer / update rule | Loss | Inference routing | Special mechanism |
+|-------|----------------------|-------------------------|------|-------------------|-------------------|
+| **LSTM Naive/Replay** | Whole LSTM + readout | Adam + CE, grad-clip 5.0 | Cross-entropy (+ replay rehearsal) | Single shared head | — |
+| **LSTM Joint** | Whole LSTM + readout | Adam + CE, grad-clip 5.0 | Cross-entropy | Single shared head | All tasks concatenated (no boundaries) |
+| **GIM-ALSTM** | Current module's LSTM + readout + that task's autoencoder | Adam + CE, grad-clip 5.0 (`lr_ae=1e-4` for AEs) | Cross-entropy + AE reconstruction | **Autoencoder picks the module** | Grows one frozen module per task |
+| **ESN Naive/EWC/LwF/Replay** | **Readout only** (reservoir frozen) | Adam + CE on readout | CE (+EWC Fisher penalty / +LwF distillation / +replay) | Single shared head | Reservoir = fixed feature extractor |
+| **ESN SLDA** | **None via gradient** | Closed-form incremental LDA | — (analytic mean/cov updates) | Shared streaming LDA | No backprop at all |
+| **ESN Joint** | Readout only | Adam + CE on readout | Cross-entropy | Single shared head | All tasks at once |
+
+Concretely, the training-loop differences are:
+
+- **What learns.** LSTM and GIM update *recurrent weights + readout*; every ESN variant updates *only the readout* (the reservoir is `requires_grad=False`); **SLDA updates no weights by gradient** — it's a closed-form classifier.
+- **Sequential vs joint.** All CL variants train task-by-task; the two **Joint** models pool all tasks into one training set, so only `Acc_final` and Cohen's κ are meaningful for them (BWT/FWT are undefined without task order).
+- **Where the anti-forgetting pressure lives.** GIM = architectural (new module + AE routing); EWC = parameter penalty; LwF = output distillation; Replay = data rehearsal; SLDA = a single shared statistical model; Naive = nothing.
+- **Per-task epochs** are tuned per (model, dataset) via Optuna, except GIM-on-MNIST which uses the paper's fixed hyper-parameters.
+- **Grad clipping (max-norm 5.0)** is applied wherever gradients flow through time — the LSTM and GIM loops, which train recurrent weights via backprop-through-time (prone to exploding gradients over the 28/200/315-step sequences). ESN skips it because only a linear readout is trained on the frozen reservoir (no BPTT), and SLDA has no gradient step at all.
 
 ---
 
-## Dependencies
+## References
 
-```
-torch
-torchvision
-scikit-learn
-numpy
-optuna
-avalanche-lib        # from repos/esn/
-```
+**Datasets**
+- **MNIST** — Y. LeCun, L. Bottou, Y. Bengio, P. Haffner. *Gradient-Based Learning Applied to Document Recognition.* Proceedings of the IEEE, 1998.
+- **WISDM** — J. R. Kwapisz, G. M. Weiss, S. A. Moore. *Activity Recognition using Cell Phone Accelerometers.* SIGKDD Explorations, 2011. ([WISDM Lab](https://www.cis.fordham.edu/wisdm/dataset.php))
+- **UWave** — J. Liu, L. Zhong, J. Wickramasuriya, V. Vasudevan. *uWave: Accelerometer-based Personalized Gesture Recognition and Its Applications.* Pervasive and Mobile Computing, 2009.
 
-The original GIM and ESN repositories in `repos/` are used directly via `sys.path`
-injection — no installation required.
+**Models & CL strategies**
+- **GIM** — A. Cossu, A. Carta, D. Bacciu. *Continual Learning with Gated Incremental Memories for Sequential Data Processing.* IJCNN, 2020.
+- **ESN for CL** — A. Cossu, D. Bacciu, A. Carta, C. Gallicchio, V. Lomonaco. *Continual Learning with Echo State Networks.* ESANN, 2021.
+
+**Preprocessing reference**
+- **WISDM windowing (200 steps, 50% overlap)** — R. R. Azghan et al. *Gated Adaptation for Continual Learning in Human Activity Recognition.* [arXiv:2603.10046](https://arxiv.org/abs/2603.10046).

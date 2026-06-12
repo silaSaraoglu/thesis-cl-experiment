@@ -1,13 +1,3 @@
-"""
-Continual learning metrics for Setting 2 (task-incremental).
-
-R[i][j]     = accuracy on task j evaluated after training on task i.
-K[i][j]     = Cohen's kappa on task j evaluated after training on task i.
-pretrain[j] = accuracy on task j just before training on it  (= R[j-1][j]).
-
-FWT uses 0.5 as the random-init baseline (all tasks are binary, chance = 0.5).
-"""
-
 import json
 import os
 from collections import defaultdict
@@ -93,6 +83,8 @@ class CLMetrics:
         }
 
 def cohen_kappa(y_true, y_pred):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
     if len(y_true) == len(y_pred):
         num_of_samples = len(y_true)
         num_of_agreements = np.sum(y_true == y_pred)

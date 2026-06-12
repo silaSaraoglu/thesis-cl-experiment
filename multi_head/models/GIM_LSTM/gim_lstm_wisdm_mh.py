@@ -18,10 +18,10 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
+from shared.dataset_cl import WISDM_CL
 from tasks.mnist.utils_single import train, test, accuracy
 from experiment.CL_experiment import CL_Experiment
-from utils.metrics import CLMetrics, cohen_kappa
+from shared.metrics import CLMetrics, cohen_kappa
 from shared.utils import gim_predict
 
 # WISDM label pairs per task (0=Walking,1=Jogging,2=Upstairs,3=Downstairs,4=Sitting,5=Standing)
@@ -49,15 +49,17 @@ def run_gim_wisdm_mh(variant, args, verbose = True, trial=None):
 
     data_root   = args.data_dir
     max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
     batch_size  = args.batch_size
     epochs      = args.epochs
+    max_grad_norm = 5.0
 
     exp_args = Namespace(
         models=[variant],
         input_size=3,
         output_size=2,
         hidden_size_rnn=args.hidden_size_rnn,
-        hidden_sizes_lmn=args.hidden_sizes_lmn,
+        hidden_sizes_lmn=[128],  # LMN/ALMN-only field; unused by the ALSTM variant we run
         memory_size_lmn=128,
         hidden_size_autoencoder=args.hidden_size_autoencoder,
         type_A=False,
@@ -82,19 +84,21 @@ def run_gim_wisdm_mh(variant, args, verbose = True, trial=None):
     wisdm_train = WISDM_CL(data_root, train=True,  download=False,
                          perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     metrics          = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
     for task_id in range(_NUM_TASKS):
-        wisdm_train.choose_subset(_TT[task_id])
+        wisdm_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = wisdm_train.get_train_val_loader(max_samples=max_samples)
 
-        task_name = WISDM_CL.TASK_NAMES.get(task_id + 1, str(_TT[task_id]))
-        if verbose:
-            print(f"  Task {task_id+1}/{_NUM_TASKS}  [{task_name}]")
 
-        wisdm_test.choose_subset(_TT[task_id])
+        wisdm_test.choose_subset(task_pairs[task_id])
         loader_pt = DataLoader(wisdm_test, batch_size=batch_size,
                                shuffle=False, drop_last=False)
         num_correct, num_total = 0.0, 0
@@ -111,7 +115,7 @@ def run_gim_wisdm_mh(variant, args, verbose = True, trial=None):
                     continue
                 x = x.to(device)
                 train(train_models, variant, x, y, accuracy, device, 2,
-                      args.max_grad_norm)
+                      max_grad_norm)
 
         final_val_acc = calculate_accuracy(train_models, variant, loader_val, device, 2, task_id)
         subtask_val_accs.append(final_val_acc)
@@ -120,9 +124,9 @@ def run_gim_wisdm_mh(variant, args, verbose = True, trial=None):
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-        if verbose: print(f"  [test after task {task_id+1}]")
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
-            wisdm_test.choose_subset(_TT[eval_id])
+            wisdm_test.choose_subset(task_pairs[eval_id])
             loader_test = DataLoader(wisdm_test, batch_size=batch_size,
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
@@ -132,7 +136,6 @@ def run_gim_wisdm_mh(variant, args, verbose = True, trial=None):
                 preds = gim_predict(train_models, x, task_id=eval_id)
                 all_preds.extend(preds)
                 all_labels.extend(y.numpy())
-            all_preds  = np.array(all_preds)
             num_of_correct_predictions = 0
             num_of_samples = len(all_labels)
             for i in range(num_of_samples):

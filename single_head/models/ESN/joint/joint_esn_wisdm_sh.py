@@ -2,7 +2,8 @@
 Joint Single-Head ESN -- WISDM  (DIL Setting 1, upper bound).
 
 Trains the readout on all tasks' data simultaneously — oracle upper bound.
-The reservoir is frozen by design; only the linear readout is updated.
+The reservoir is frozen by design
+only the linear readout is updated.
 Tasks: 3 binary tasks — Walking/Jogging · Upstairs/Downstairs · Sitting/Standing.
 Input: WISDM accelerometer signals, shape (B, 128, 3).
 """
@@ -18,9 +19,9 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
-from utils.metrics import CLMetrics, cohen_kappa
-from models.ESN.esn_utils import build_model, predict_step
+from shared.dataset_cl import WISDM_CL
+from shared.metrics import CLMetrics, cohen_kappa
+from models.ESN.esn_utils import SingleHeadESN
 from shared.utils import collect_datasets
 from clrnn.utils import get_strategy
 from avalanche.benchmarks import dataset_benchmark
@@ -31,11 +32,14 @@ _NUM_TASKS = 3
 
 def calculate_accuracy(model, loader):
     num_correct = 0.0
-    num_total   = 0
+    num_total = 0
     for x, y in loader:
-        batch_size   = y.size(0)
-        num_correct  = num_correct + (predict_step(model, x) == y.numpy()).sum()
-        num_total    = num_total   + batch_size
+        preds = model.predict(x)
+        labels = y.numpy()
+        for i in range(len(preds)):
+            if preds[i] == labels[i]:
+                num_correct += 1
+        num_total += y.size(0)
     return num_correct / num_total
 
 def run_joint_esn_wisdm_sh(args, verbose = True):
@@ -46,16 +50,22 @@ def run_joint_esn_wisdm_sh(args, verbose = True):
     batch_size    = args.batch_size
     learning_rate = args.learning_rate
     max_samples   = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
 
     wisdm_train = WISDM_CL(data_root, train=True,  download=False,
                          perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        wisdm_train, wisdm_test, _TT, max_samples, batch_size)
+        wisdm_train, wisdm_test, task_pairs, max_samples, batch_size)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
-    model     = build_model(input_size=3, args=args, device=device)
+    model     = SingleHeadESN(input_size=3, args=args)
     opt       = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss()
 
@@ -71,13 +81,14 @@ def run_joint_esn_wisdm_sh(args, verbose = True):
         loader_val = DataLoader(val_datasets[t], batch_size=batch_size, shuffle=False)
         subtask_val_accs.append(calculate_accuracy(model, loader_val))
 
-    if verbose: print("  [test after joint training]")
+    if verbose: print("  [After joint training]")
     for eval_id in range(_NUM_TASKS):
         loader_te = DataLoader(test_datasets[eval_id], batch_size=batch_size, shuffle=False)
         all_predictions, all_labels = [], []
         for x, y in loader_te:
-            all_predictions.extend(predict_step(model, x)); all_labels.extend(y.numpy())
-        all_predictions = np.array(all_predictions);        num_of_correct_predictions = 0
+            all_predictions.extend(model.predict(x))
+            all_labels.extend(y.numpy())
+        num_of_correct_predictions = 0
         num_of_samples = len(all_labels)
         for i in range(num_of_samples):
             if all_predictions[i] == all_labels[i]:
@@ -92,8 +103,13 @@ def run_joint_esn_wisdm_sh(args, verbose = True):
 
     test_accs = [float(metrics.R[_NUM_TASKS-1].get(j, 0.0)) for j in range(_NUM_TASKS)]
     if verbose:
-        acc_final = float(np.mean(test_accs))
-        avg_kappa = float(np.mean([metrics.K[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]))
+        acc_final = 0.0
+        avg_kappa = 0.0
+        for j in range(_NUM_TASKS):
+            acc_final += test_accs[j]
+            avg_kappa += metrics.K[_NUM_TASKS-1].get(j, 0.0)
+        acc_final = float(acc_final / _NUM_TASKS)
+        avg_kappa = float(avg_kappa / _NUM_TASKS)
         print(f"")
         print("  WISDM results  --  ESN-Joint  [oracle upper bound]")
         print("  NOTE: Only ACC_final and Cohen's kappa are valid for joint training.")

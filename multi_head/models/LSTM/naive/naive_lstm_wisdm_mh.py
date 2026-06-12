@@ -17,10 +17,10 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
+from shared.dataset_cl import WISDM_CL
 from tasks.mnist.utils_single import accuracy
-from utils.metrics import CLMetrics, cohen_kappa
-from models.multi_head_utils import MultiHeadLSTM, _forward_mh
+from shared.metrics import CLMetrics, cohen_kappa
+from models.LSTM.multi_head_lstm_model import MultiHeadLSTM
 
 # WISDM label pairs per task (0=Walking,1=Jogging,2=Upstairs,3=Downstairs,4=Sitting,5=Standing)
 _TT        = [[0, 1], [2, 3], [4, 5]]  # Walking/Jogging · Upstairs/Downstairs · Sitting/Standing
@@ -33,9 +33,10 @@ def calculate_accuracy(model, loader):
     with torch.no_grad():
         for x, y in loader:
             x = x.to(model.device)
+            y = y.to(model.device)
             batch_size   = y.size(0)
-            num_correct  = num_correct + accuracy(_forward_mh(model, x), y) * batch_size
-            num_total    = num_total   + batch_size
+            num_correct  = num_correct + accuracy(model(x), y) * batch_size
+            num_total = num_total + batch_size
     return num_correct / num_total
 
 def run_naive_lstm_wisdm_mh(args, verbose = True, trial=None):
@@ -50,21 +51,24 @@ def run_naive_lstm_wisdm_mh(args, verbose = True, trial=None):
     criterion   = torch.nn.CrossEntropyLoss()
     data_root   = args.data_dir
     max_samples = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
 
     wisdm_train = WISDM_CL(data_root, train=True,  download=False,
                          perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     metrics          = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
     for task_id in range(_NUM_TASKS):
-        wisdm_train.choose_subset(_TT[task_id])
+        wisdm_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = wisdm_train.get_train_val_loader(max_samples=max_samples)
 
-        task_name = WISDM_CL.TASK_NAMES.get(task_id + 1, str(_TT[task_id]))
-        if verbose:
-            print(f"  Task {task_id+1}/{_NUM_TASKS}  [{task_name}]")
 
         metrics.record_pretrain(task_id, 0.5)
         model.add_head(task_id)
@@ -72,14 +76,15 @@ def run_naive_lstm_wisdm_mh(args, verbose = True, trial=None):
 
         body_params = list(model.rnn_module.parameters())
         head_params = list(model.heads[str(task_id)].parameters())
-        optimizer = optim.Adam(body_params + head_params,
-                               lr=learning_rate)
+        optimizer = optim.Adam(body_params + head_params, lr=learning_rate)
 
         for _ in range(epochs):
             model.train()
             for x, y in loader_train:
+                x = x.to(device)
+                y = y.to(device)
                 optimizer.zero_grad()
-                logits = _forward_mh(model, x)
+                logits = model(x)
                 loss   = criterion(logits, y)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -92,20 +97,21 @@ def run_naive_lstm_wisdm_mh(args, verbose = True, trial=None):
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-        if verbose: print(f"  [test after task {task_id+1}]")
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
             model.set_task(eval_id)
-            wisdm_test.choose_subset(_TT[eval_id])
+            wisdm_test.choose_subset(task_pairs[eval_id])
             loader_test = DataLoader(wisdm_test, batch_size=batch_size,
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
             model.eval()
             with torch.no_grad():
                 for x, y in loader_test:
-                    preds  = _forward_mh(model, x).argmax(dim=1).numpy()
+                    x = x.to(device)
+                    preds  = model(x).argmax(dim=1).cpu().numpy()
                     labels = y.numpy()
-                    all_preds.extend(preds); all_labels.extend(labels)
-            all_preds  = np.array(all_preds)
+                    all_preds.extend(preds)
+                    all_labels.extend(labels)
             num_of_correct_predictions = 0
             num_of_samples = len(all_labels)
             for i in range(num_of_samples):

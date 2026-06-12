@@ -7,7 +7,8 @@ CL strategy: Avalanche StreamingLDA via the original repo's get_strategy().
   No task ID used at test time — true single-head DIL setting.
 
 Tasks: 3 binary tasks — Walking/WalkingUp · WalkingDown/Sitting · Standing/Laying.
-Input: WISDM accelerometer signals (B, 128, 3); features: (B, esn_units).
+Input: WISDM accelerometer signals (B, 128, 3)
+features: (B, esn_units).
 See esn_experiment_mnist.py for full strategy documentation.
 Original repo: models/ESN/repo/experiments/splitmnist_esn.py  (strategy='slda')
 """
@@ -24,9 +25,9 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
-from utils.metrics import CLMetrics, cohen_kappa
-from models.ESN.esn_utils import build_model
+from shared.dataset_cl import WISDM_CL
+from shared.metrics import CLMetrics, cohen_kappa
+from models.ESN.esn_utils import SingleHeadESN
 from shared.utils import collect_datasets
 from clrnn.deep_esn import ESNWrapper
 from clrnn.utils import get_strategy
@@ -57,21 +58,24 @@ def run_esn_slda_wisdm(args, verbose = True, trial=None):
     batch_size    = args.batch_size
     learning_rate = args.learning_rate
     max_samples   = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
 
-    # ── Data ─────────────────────────────────────────────────────────────────
     wisdm_train = WISDM_CL(data_root, train=True,  download=False,
                          perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        wisdm_train, wisdm_test, _TT, max_samples, batch_size)
+        wisdm_train, wisdm_test, task_pairs, max_samples, batch_size)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
-    # ── Model: ESNWrapper for StreamingLDA feature extraction ────────────────
-    reservoir = build_model(input_size=3, args=args, device=device)
-    model     = ESNWrapper(reservoir, 'hidden')
+    reservoir = SingleHeadESN(input_size=3, args=args)
+    model = ESNWrapper(reservoir, 'hidden')
 
-    # ── Strategy: StreamingLDA via original repo's get_strategy ──────────────
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss()
     args_cl   = Namespace(**{**vars(args),
@@ -86,11 +90,7 @@ def run_esn_slda_wisdm(args, verbose = True, trial=None):
     metrics          = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
-    # ── Task loop ─────────────────────────────────────────────────────────────
     for task_id, exp in enumerate(scenario.train_stream):
-        task_name = WISDM_CL.TASK_NAMES.get(task_id + 1, str(_TT[task_id]))
-        if verbose:
-            print(f"  Task {task_id+1}/{_NUM_TASKS}  [{task_name}]")
 
         metrics.record_pretrain(task_id, 0.5)
 
@@ -98,7 +98,11 @@ def run_esn_slda_wisdm(args, verbose = True, trial=None):
 
         loader_val = DataLoader(val_datasets[task_id], batch_size=batch_size, shuffle=False)
         preds, labels = _predict(cl_strategy, loader_val)
-        final_val_acc = float((preds == labels).mean())
+        num_correct = 0
+        for i in range(len(preds)):
+            if preds[i] == labels[i]:
+                num_correct += 1
+        final_val_acc = float(num_correct / len(labels))
         subtask_val_accs.append(final_val_acc)
         if trial is not None:
             trial.report(float(np.mean(subtask_val_accs)), task_id)
@@ -107,11 +111,15 @@ def run_esn_slda_wisdm(args, verbose = True, trial=None):
         if verbose:
             print(f"    StreamingLDA updated | val_acc={final_val_acc:.4f}")
 
-        if verbose: print(f"  [test after task {task_id+1}]")
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
             loader_te = DataLoader(test_datasets[eval_id], batch_size=batch_size, shuffle=False)
             preds, labels = _predict(cl_strategy, loader_te)
-            acc   = float((preds == labels).mean())
+            num_correct = 0
+            for i in range(len(preds)):
+                if preds[i] == labels[i]:
+                    num_correct += 1
+            acc = float(num_correct / len(labels))
             kappa = cohen_kappa(labels, preds)
             metrics.record(after_task=task_id, eval_task=eval_id, acc=acc)
             metrics.record_kappa(after_task=task_id, eval_task=eval_id, kappa=kappa)

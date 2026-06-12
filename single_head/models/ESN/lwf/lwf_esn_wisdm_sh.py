@@ -21,9 +21,9 @@ while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
 import setup_paths
 
-from tasks.dataset_cl import WISDM_CL
-from utils.metrics import CLMetrics, cohen_kappa
-from models.ESN.esn_utils import build_model, predict_step
+from shared.dataset_cl import WISDM_CL
+from shared.metrics import CLMetrics, cohen_kappa
+from models.ESN.esn_utils import SingleHeadESN
 from shared.utils import collect_datasets
 from clrnn.utils import get_strategy
 from avalanche.benchmarks import dataset_benchmark
@@ -35,11 +35,14 @@ _NUM_TASKS = 3
 
 def calculate_accuracy(model, loader):
     num_correct = 0.0
-    num_total   = 0
+    num_total = 0
     for x, y in loader:
-        batch_size   = y.size(0)
-        num_correct  = num_correct + (predict_step(model, x) == y.numpy()).sum()
-        num_total    = num_total   + batch_size
+        preds = model.predict(x)
+        labels = y.numpy()
+        for i in range(len(preds)):
+            if preds[i] == labels[i]:
+                num_correct += 1
+        num_total += y.size(0)
     return num_correct / num_total
 
 def run_esn_lwf_wisdm(args, verbose = True, trial=None):
@@ -50,15 +53,21 @@ def run_esn_lwf_wisdm(args, verbose = True, trial=None):
     batch_size    = args.batch_size
     learning_rate = args.learning_rate
     max_samples   = args.subset
+    task_pairs = getattr(args, 'task_pairs', _TT)
 
     wisdm_train = WISDM_CL(data_root, train=True,  download=False, perc_val=0.25, batch_size=batch_size)
     wisdm_test  = WISDM_CL(data_root, train=False, download=False)
+    wisdm_train.set_holdout_config(
+        holdout_n    = getattr(args, "holdout_n", 0),
+        holdout_seed = getattr(args, "holdout_seed", 0),
+        use_holdout  = getattr(args, "use_holdout", False),
+    )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        wisdm_train, wisdm_test, _TT, max_samples, batch_size)
+        wisdm_train, wisdm_test, task_pairs, max_samples, batch_size)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
-    model     = build_model(input_size=3, args=args, device=device)
+    model     = SingleHeadESN(input_size=3, args=args)
     opt       = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss()
 
@@ -69,9 +78,6 @@ def run_esn_lwf_wisdm(args, verbose = True, trial=None):
     subtask_val_accs = []
 
     for task_id, exp in enumerate(scenario.train_stream):
-        task_name = WISDM_CL.TASK_NAMES.get(task_id + 1, str(_TT[task_id]))
-        if verbose:
-            print(f"  Task {task_id+1}/{_NUM_TASKS}  [{task_name}]")
 
         loader_pt = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False)
         metrics.record_pretrain(task_id, calculate_accuracy(model, loader_pt))
@@ -85,13 +91,14 @@ def run_esn_lwf_wisdm(args, verbose = True, trial=None):
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-        if verbose: print(f"  [test after task {task_id+1}]")
+        if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
             loader_te = DataLoader(test_datasets[eval_id], batch_size=batch_size, shuffle=False)
             all_predictions, all_labels = [], []
             for x, y in loader_te:
-                all_predictions.extend(predict_step(model, x)); all_labels.extend(y.numpy())
-            all_predictions = np.array(all_predictions);            num_of_correct_predictions = 0
+                all_predictions.extend(model.predict(x))
+                all_labels.extend(y.numpy())
+            num_of_correct_predictions = 0
             num_of_samples = len(all_labels)
             for i in range(num_of_samples):
                 if all_predictions[i] == all_labels[i]:
