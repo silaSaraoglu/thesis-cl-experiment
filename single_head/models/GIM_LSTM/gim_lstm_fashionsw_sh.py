@@ -1,38 +1,9 @@
-"""
-GIM experiment runner -- Sequential MNIST.
-
-GIM (Growing Input Modules) is an expandable architecture for continual learning.
-Original paper: "Continual Learning with Gated Incremental Memories" (Cossu et al.)
-Original repo:  models/GIM/repo/mnist.py
-
-How GIM works:
-  - ALSTM: each module is an LSTM
-  ALMN: each module is an LMN (Linear Memory Network).
-  - One autoencoder (AE) is trained alongside the main model for each task.
-  - Module growing: if val_acc < threshold_acc after task t, a new module is added
-    before moving to task t+1.  threshold_acc=1.01 (default) → always add one module
-    per task (since accuracy ≤ 1.0 always falls below 1.01).
-  - Test-time routing: test_autoencoder() runs each AE on the test input and picks
-    the module whose AE has the lowest reconstruction error.
-  - gim_predict() classifies using the selected module.
-
-This file calls the original repo functions WITHOUT modification:
-  train()            — one supervised gradient step on the RNN readout
-  test()             — forward pass + accuracy
-  train_autoencoder()— one reconstruction step on the task-t AE
-  test_autoencoder() — picks the module with lowest reconstruction loss
-  CL_Experiment      — creates models and autoencoders with the original factory
-
-Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
-Input: MNIST as row-based sequence (B, 28, 28) — 28 time steps × 28 pixel features.
-"""
 import os
 import sys
 import argparse
 import numpy as np
 import optuna
 
-import torch
 
 
 from torch.utils.data import DataLoader
@@ -40,7 +11,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from tasks.mnist.utils_single import train, test, accuracy, train_autoencoder, test_autoencoder
@@ -54,7 +25,7 @@ _NUM_TASKS = 3
 
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -62,7 +33,7 @@ def calculate_accuracy(train_models, variant, loader, device, output_size):
     num_correct = 0.0
     num_total = 0
     for x, y in loader:
-        x = _px(x)
+        x = px(x)
         batch_size = y.size(0)
         _, acc = test(train_models, variant, x, y, accuracy, device, output_size)
         num_correct = num_correct +  acc * batch_size
@@ -70,21 +41,6 @@ def calculate_accuracy(train_models, variant, loader, device, output_size):
     return num_correct / num_total
 
 def run_gim_fashionsw(variant, args, verbose = True, trial=None):
-    """
-    Train and evaluate one GIM run using the original repo code directly.
-
-    Parameters
-    ----------
-    variant : 'alstm' or 'almn'
-
-    Returns
-    -------
-    val_accs           : list[float]  — final val acc after training each task
-    test_accs          : list[float]  — test acc on each task after all tasks trained
-    metrics            : CLMetrics    — full R matrix + kappa
-    train_models       : dict         — original model dict (ALSTM or ALMN)
-    train_autoencoders : list         — one AE per task
-    """
     hidden_size_rnn = args.hidden_size_rnn
     hidden_sizes_lmn = [128]  # LMN/ALMN-only field; unused by the ALSTM variant we run
     hidden_size_autoencoder = args.hidden_size_autoencoder
@@ -96,7 +52,6 @@ def run_gim_fashionsw(variant, args, verbose = True, trial=None):
     epochs = args.epochs
     max_grad_norm = 5.0
     image_size = 28
-    input_size = image_size
     output_size = 2
 
     exp_args = argparse.Namespace(
@@ -150,7 +105,7 @@ def run_gim_fashionsw(variant, args, verbose = True, trial=None):
 
         for _ in range(epochs):
             for x, y in loader_train:
-                x = _px(x)
+                x = px(x)
                 if train_autoencoders:
                     train_autoencoder(
                         train_autoencoders[0][task_id],
@@ -175,7 +130,7 @@ def run_gim_fashionsw(variant, args, verbose = True, trial=None):
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
             for x, y in loader_test:
-                x = _px(x)
+                x = px(x)
                 if train_autoencoders:
                     # Route: pick the module whose AE best reconstructs this input
                     _, mod_id = test_autoencoder(train_autoencoders, x, MSEMasked, device)
@@ -200,18 +155,11 @@ def run_gim_fashionsw(variant, args, verbose = True, trial=None):
         # Module growing: add a new module if val_acc < threshold_acc
         # threshold_acc=1.01 by default → always adds one module per task
         if task_id < _NUM_TASKS - 1 and final_val_acc < 1.01:
-            if variant == "almn":
-                n = len(train_models["almn"][0].lmns)
-                if verbose:
-                    print(f"  [GIM-ALMN] Added module {n + 1} for task {task_id + 1} "
-                          f"(val_acc {final_val_acc:.3f} < 1.01)")
-                train_models["almn"][0].add_new_module(train_models["almn"][1])
-            else:
-                n = len(train_models["alstm"][0].lstms)
-                if verbose:
-                    print(f"  [GIM-ALSTM] Added module {n + 1} for task {task_id + 1} "
-                          f"(val_acc {final_val_acc:.3f} < 1.01)")
-                train_models["alstm"][0].add_new_module(train_models["alstm"][1])
+            n = len(train_models["alstm"][0].lstms)
+            if verbose:
+                print(f"  [GIM-ALSTM] Added module {n + 1} for task {task_id + 1} "
+                      f"(val_acc {final_val_acc:.3f} < 1.01)")
+            train_models["alstm"][0].add_new_module(train_models["alstm"][1])
 
     test_accs = [metrics.R[_NUM_TASKS - 1].get(j, 0.0) for j in range(_NUM_TASKS)]
 

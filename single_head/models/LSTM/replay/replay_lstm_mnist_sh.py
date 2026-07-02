@@ -2,19 +2,21 @@
 LSTM with Experience Replay -- MNIST  (DIL Setting 1).
 
 CL strategy: Experience Replay.
-  A fixed-size buffer stores mem_size samples from all past tasks combined.
-  Each task slot gets mem_size // num_tasks_seen samples (balanced reservoir).
-  New-task training uses the concatenation of current-task data + buffer,
-  so the model sees old and new examples in every epoch.
+  A fixed-size (mem_size) balanced reservoir buffer, mirroring the ESN-Replay
+  path's Avalanche memory (ExperienceBalancedBuffer + reservoir sampling): the
+  buffer stays full and is split evenly across the tasks seen so far
+  (mem_size // k each after k tasks), so after task 1 it holds mem_size task-1
+  samples and each later task trims the earlier ones to make room. New-task
+  training mixes a fixed amount of new and replayed samples in every mini-batch
+  (batch_size new + batch_size memory, memory oversampled when smaller),
+  mirroring Avalanche's ReplayDataLoader, so the model sees old and new examples
+  in every step.
 
 Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
 Input: MNIST pixels row-by-row (B, 28, 28) — 28 time steps × 28 pixel features.
 """
 import os, sys
 import torch
-
-
-
 import torch.optim as optim
 import optuna
 import numpy as np
@@ -24,11 +26,12 @@ from torch.utils.data import DataLoader, TensorDataset
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import MNIST_CL
 from tasks.mnist.utils_single import accuracy
 from shared.metrics import CLMetrics, cohen_kappa
+from shared.replay_buffer import BalancedReservoirBuffer
 from models.LSTM.model import SingleHeadLSTM
 
 _TT = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
@@ -36,7 +39,7 @@ _NUM_TASKS = 5
 
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -46,7 +49,7 @@ def calculate_accuracy(model, loader):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = _px(x)
+            x = px(x)
             batch_size = y.size(0)
             num_correct = num_correct + accuracy(model(x), y) * batch_size
             num_total = num_total   + batch_size
@@ -86,15 +89,24 @@ def run_lstm_replay_mnist_sh(args, verbose=True, trial=None):
     metrics = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
-    mem_size = 0  # set from first task's training data
-    buf = []  # list of (X, Y) per past task; total ≤ mem_size via reservoir sampling
+    # Size the replay buffer like the ESN-Replay path: the sum of 10% of each
+    # task's training split, not task-0 x num_tasks (which assumes all tasks are
+    # the same size). The pre-pass only reads split *sizes*; get_train_val_loader
+    # draws its split from numpy's global RNG, so we snapshot/restore that state
+    # to leave the actual splits in the main loop unchanged.
+    _rng_state = np.random.get_state()
+    mem_size = 0
+    for _tp in task_pairs:
+        mnist_train.choose_subset(_tp)
+        _lt, _ = mnist_train.get_train_val_loader(max_samples=max_samples)
+        mem_size += int(len(_lt.batch_sampler.sampler) * 0.1)
+    mem_size = max(1, mem_size)
+    np.random.set_state(_rng_state)
+    replay_buffer = BalancedReservoirBuffer(mem_size)  # mirrors the ESN-Replay (Avalanche) memory
 
     for task_id in range(_NUM_TASKS):
         mnist_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
-        # setting memory size for replay buffer
-        if task_id == 0:
-            mem_size = max(1, int(len(loader_train.dataset) * _NUM_TASKS * 0.1))
 
         # Pre-task accuracy (for FWT)
         mnist_test.choose_subset(task_pairs[task_id])
@@ -104,22 +116,37 @@ def run_lstm_replay_mnist_sh(args, verbose=True, trial=None):
 
         # Materialize current task's training data
         xs, ys = [], []
-        for x, y in DataLoader(loader_train.dataset, batch_size=256, shuffle=False, drop_last=False):
+        for x, y in loader_train:   # train split only (respects sampler + max_samples subset)
             xs.append(x)
             ys.append(y)
         cur_X, cur_Y = torch.cat(xs), torch.cat(ys)
 
-        # Build combined dataset: current task + replay buffer
-        all_X = torch.cat([cur_X] + [b[0] for b in buf])
-        all_Y = torch.cat([cur_Y] + [b[1] for b in buf])
-
-        combined_loader = DataLoader(
-            TensorDataset(all_X, all_Y), batch_size=batch_size, shuffle=True, drop_last=False)
+        # Separate current + memory loaders so each mini-batch mixes a fixed
+        # amount of new and replayed samples (mirrors Avalanche's
+        # ReplayDataLoader: batch_size new + batch_size_mem memory per batch,
+        # with batch_size_mem == batch_size). The memory loader is re-cycled
+        # whenever it runs dry, reproducing oversample_small_tasks=True.
+        cur_loader = DataLoader(
+            TensorDataset(cur_X, cur_Y), batch_size=batch_size, shuffle=True, drop_last=False)
+        buf_X, buf_Y = replay_buffer.data()
+        mem_loader = None
+        if buf_X is not None:
+            mem_loader = DataLoader(
+                TensorDataset(buf_X, buf_Y), batch_size=batch_size, shuffle=True, drop_last=False)
 
         for _ in range(epochs):
             model.train()
-            for x, y in combined_loader:
-                x = _px(x)
+            mem_iter = iter(mem_loader) if mem_loader is not None else None
+            for x, y in cur_loader:
+                if mem_iter is not None:
+                    try:
+                        mx, my = next(mem_iter)
+                    except StopIteration:
+                        mem_iter = iter(mem_loader)
+                        mx, my = next(mem_iter)
+                    x = torch.cat([x, mx])
+                    y = torch.cat([y, my])
+                x = px(x)
                 optimizer.zero_grad()
                 loss = criterion(model(x), y)
                 loss.backward()
@@ -132,9 +159,8 @@ def run_lstm_replay_mnist_sh(args, verbose=True, trial=None):
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-        # Store fixed per-task quota: mem_size split equally across all tasks
-        perm = torch.randperm(cur_X.size(0))[:max(1, mem_size // _NUM_TASKS)]
-        buf.append((cur_X[perm], cur_Y[perm]))
+        # Reservoir update + rebalance (mirrors Avalanche ExperienceBalancedBuffer)
+        replay_buffer.update(cur_X, cur_Y)
 
         if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
@@ -145,7 +171,7 @@ def run_lstm_replay_mnist_sh(args, verbose=True, trial=None):
             model.eval()
             with torch.no_grad():
                 for x, y in loader_te:
-                    x = _px(x)
+                    x = px(x)
                     preds = model(x).argmax(dim=1).numpy()
                     all_preds.extend(preds)
                     all_labels.extend(y.numpy())

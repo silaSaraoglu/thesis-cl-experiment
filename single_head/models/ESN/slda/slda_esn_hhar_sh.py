@@ -16,7 +16,7 @@ from argparse import Namespace
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import HHAR_CL
 from shared.metrics import CLMetrics, cohen_kappa
@@ -30,7 +30,7 @@ from avalanche.training.plugins import EvaluationPlugin
 _TASKS     = [0, 1, 2, 3]
 _NUM_TASKS = 4
 
-def _predict(cl_strategy, loader):
+def predict(cl_strategy, loader):
     all_predictions, all_labels = [], []
     device = next(cl_strategy.model.parameters()).device
     with torch.no_grad():
@@ -73,7 +73,7 @@ def run_esn_slda_hhar(args, verbose = True, trial=None):
         'strategy':    'slda',
         'input_size':  args.esn_units,
         'num_classes': 6,
-        'shrinkage':   1e-5,
+        'shrinkage':   1e-4,
     })
     cl_strategy = get_strategy(model, optimizer, criterion,
                                EvaluationPlugin(), device, args_cl)
@@ -83,12 +83,20 @@ def run_esn_slda_hhar(args, verbose = True, trial=None):
 
     for task_id, exp in enumerate(scenario.train_stream):
 
-        metrics.record_pretrain(task_id, 1.0 / 6)
+        # Zero-shot accuracy on the upcoming task, using the LDA fitted on tasks
+        # 0..task_id-1 (matches how naive/EWC/LwF/replay record pretrain). Task 0
+        # has no fitted LDA yet, so it stays at chance (FWT averages only j>0).
+        if task_id == 0:
+            metrics.record_pretrain(task_id, 1.0 / 6)
+        else:
+            loader_pt = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False)
+            pre_preds, pre_labels = predict(cl_strategy, loader_pt)
+            metrics.record_pretrain(task_id, float((pre_preds == pre_labels).mean()))
 
         cl_strategy.train(exp)
 
         loader_val = DataLoader(val_datasets[task_id], batch_size=batch_size, shuffle=False)
-        preds, labels = _predict(cl_strategy, loader_val)
+        preds, labels = predict(cl_strategy, loader_val)
         num_correct = int((preds == labels).sum())
         final_val_acc = float(num_correct / len(labels))
         subtask_val_accs.append(final_val_acc)
@@ -102,7 +110,7 @@ def run_esn_slda_hhar(args, verbose = True, trial=None):
         if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
             loader_te = DataLoader(test_datasets[eval_id], batch_size=batch_size, shuffle=False)
-            preds, labels = _predict(cl_strategy, loader_te)
+            preds, labels = predict(cl_strategy, loader_te)
             acc = float(int((preds == labels).sum()) / len(labels))
             kappa = cohen_kappa(labels, preds)
             metrics.record(after_task=task_id, eval_task=eval_id, acc=acc)

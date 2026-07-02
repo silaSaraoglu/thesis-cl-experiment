@@ -29,7 +29,7 @@ from argparse import Namespace
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from shared.metrics import CLMetrics, cohen_kappa
@@ -43,7 +43,7 @@ from avalanche.training.plugins import EvaluationPlugin
 _TT = [[0, 2], [3, 4], [5, 9]]
 _NUM_TASKS = 3
 
-def _predict(cl_strategy, loader):
+def predict(cl_strategy, loader):
     """Extract reservoir features then classify with the shared LDA."""
     all_predictions, all_labels = [], []
     device = next(cl_strategy.model.parameters()).device
@@ -102,15 +102,22 @@ def run_esn_slda_fashionsw(args, verbose = True, trial=None):
 
     for task_id, exp in enumerate(scenario.train_stream):
 
-        # Pre-task: LDA not yet updated for this domain → 0.5
-        metrics.record_pretrain(task_id, 0.5)
+        # Zero-shot accuracy on the upcoming task, using the LDA fitted on tasks
+        # 0..task_id-1 (matches how naive/EWC/LwF/replay record pretrain). Task 0
+        # has no fitted LDA yet, so it stays at chance (FWT averages only j>0).
+        if task_id == 0:
+            metrics.record_pretrain(task_id, 0.5)
+        else:
+            loader_pt = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False)
+            pre_preds, pre_labels = predict(cl_strategy, loader_pt)
+            metrics.record_pretrain(task_id, float((pre_preds == pre_labels).mean()))
 
         # Incrementally update the shared LDA with this task's data
         cl_strategy.train(exp)
 
         # Validation accuracy with the updated shared LDA
         loader_val = DataLoader(val_datasets[task_id], batch_size=batch_size, shuffle=False)
-        preds, labels = _predict(cl_strategy, loader_val)
+        preds, labels = predict(cl_strategy, loader_val)
         num_correct = 0
         for i in range(len(preds)):
             if preds[i] == labels[i]:
@@ -128,7 +135,7 @@ def run_esn_slda_fashionsw(args, verbose = True, trial=None):
         if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
             loader_te = DataLoader(test_datasets[eval_id], batch_size=batch_size, shuffle=False)
-            preds, labels = _predict(cl_strategy, loader_te)
+            preds, labels = predict(cl_strategy, loader_te)
             num_correct = 0
             for i in range(len(preds)):
                 if preds[i] == labels[i]:

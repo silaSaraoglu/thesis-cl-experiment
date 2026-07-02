@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import HHAR_CL
 from tasks.mnist.utils_single import accuracy

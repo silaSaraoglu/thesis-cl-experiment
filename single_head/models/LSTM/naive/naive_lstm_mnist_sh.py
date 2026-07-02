@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import MNIST_CL
 from tasks.mnist.utils_single import accuracy
@@ -31,7 +31,7 @@ _NUM_TASKS = 5
 
 # calculation is based on batch size considering last batch size may differ than others
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -41,7 +41,7 @@ def calculate_accuracy(model, loader):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = _px(x)
+            x = px(x)
             batch_size = y.size(0)
             num_correct =  num_correct + accuracy(model(x), y) * batch_size
             num_total = num_total + batch_size
@@ -91,7 +91,7 @@ def run_naive_lstm_mnist_sh(args, verbose=True, trial=None):
         for _ in range(epochs):
             model.train()
             for x, y in loader_train:
-                x = _px(x)
+                x = px(x)
                 optimizer.zero_grad()
                 loss = criterion(model(x), y)
                 loss.backward()
@@ -113,7 +113,7 @@ def run_naive_lstm_mnist_sh(args, verbose=True, trial=None):
             model.eval()
             with torch.no_grad():
                 for x, y in loader_test:
-                    x = _px(x)
+                    x = px(x)
                     preds = model(x).argmax(dim=1).numpy()
                     labels = y.numpy()
                     all_preds.extend(preds)

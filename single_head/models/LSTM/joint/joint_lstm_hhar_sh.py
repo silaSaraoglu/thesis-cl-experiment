@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import HHAR_CL
 from tasks.mnist.utils_single import accuracy
@@ -66,9 +66,8 @@ def run_joint_lstm_hhar_sh(args, verbose = True):
         hhar_train.choose_domain(task_order[t])
         loader_train, loader_val = hhar_train.get_train_val_loader(max_samples=max_samples)
         for src, store in [(loader_train, train_datasets), (loader_val, val_datasets)]:
-            tmp = DataLoader(src.dataset, batch_size=256, shuffle=False, drop_last=False)
             batch_inputs, batch_labels = [], []
-            for x, y in tmp:
+            for x, y in src:   # train/val split only (respects sampler + subset)
                 batch_inputs.append(x)
                 batch_labels.append(y)
             store.append(TensorDataset(torch.cat(batch_inputs), torch.cat(batch_labels)))
