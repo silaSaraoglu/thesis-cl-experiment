@@ -1,8 +1,9 @@
 """
-Naive Multi-Head LSTM -- MNIST  (TIL Setting 2).
+Naive Multi-Head LSTM -- Fashion-MNIST (summer-vs-winter)  (TIL Setting 2).
 
 Shared LSTM body + per-task linear head (ModuleDict).
-Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
+Tasks: 3 binary summer-vs-winter tasks within a garment category
+(Tshirt/Pullover, Dress/Coat, Sandal/Ankle-boot).
 """
 import os, sys
 import torch
@@ -16,7 +17,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from tasks.mnist.utils_single import accuracy
@@ -27,7 +28,7 @@ _TT = [[0, 2], [3, 4], [5, 9]]
 _NUM_TASKS = 3
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -37,7 +38,7 @@ def calculate_accuracy(model, loader):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = _px(x).to(model.device)
+            x = px(x).to(model.device)
             y = y.to(model.device)
             batch_size = y.size(0)
             num_correct = num_correct + accuracy(model(x), y) * batch_size
@@ -45,7 +46,7 @@ def calculate_accuracy(model, loader):
     return num_correct / num_total
 
 def run_naive_lstm_fashionsw_mh(args, verbose = True, trial=None):
-    """Naive Multi-Head LSTM on MNIST. Returns val_accs, test_accs, metrics, model, []."""
+    """Naive Multi-Head LSTM on Fashion-SW. Returns val_accs, test_accs, metrics, model, []."""
 
     device = args.device
     batch_size = args.batch_size
@@ -88,7 +89,7 @@ def run_naive_lstm_fashionsw_mh(args, verbose = True, trial=None):
         for _ in range(epochs):
             model.train()
             for x, y in loader_train:
-                x = _px(x).to(device)
+                x = px(x).to(device)
                 y = y.to(device)
                 optimizer.zero_grad()
                 logits = model(x)
@@ -114,7 +115,7 @@ def run_naive_lstm_fashionsw_mh(args, verbose = True, trial=None):
             model.eval()
             with torch.no_grad():
                 for x, y in loader_test:
-                    x = _px(x).to(device)
+                    x = px(x).to(device)
                     preds = model(x).argmax(dim=1).cpu().numpy()
                     labels = y.numpy()
                     all_preds.extend(preds)
@@ -134,7 +135,7 @@ def run_naive_lstm_fashionsw_mh(args, verbose = True, trial=None):
     test_accs = [metrics.R[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]
     if verbose:
         print()
-        print("MNIST results  --  LSTM MH (Naive)")
+        print("Fashion-SW results  --  LSTM MH (Naive)")
         print(f"Validation : {[round(v,4) for v in subtask_val_accs]}")
         print(f"Test       : {[round(t,4) for t in test_accs]}")
     return subtask_val_accs, test_accs, metrics, model, []

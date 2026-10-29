@@ -9,13 +9,12 @@ Input: WISDM accelerometer signals, shape (B, 128, 3).
 import os, sys, random
 import torch
 import torch.optim as optim
-import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import WISDM_CL
 from tasks.mnist.utils_single import accuracy
@@ -67,9 +66,8 @@ def run_joint_lstm_wisdm_mh(args, verbose = True):
         wisdm_train.choose_subset(task_pairs[t])
         loader_train, loader_val = wisdm_train.get_train_val_loader(max_samples=max_samples)
         for src, store in [(loader_train, train_datasets), (loader_val, val_datasets)]:
-            tmp = DataLoader(src.dataset, batch_size=256, shuffle=False, drop_last=False)
             batch_inputs, batch_labels = [], []
-            for x, y in tmp:
+            for x, y in src:   # train/val split only (respects sampler + subset)
                 batch_inputs.append(x)
                 batch_labels.append(y)
             store.append(TensorDataset(torch.cat(batch_inputs), torch.cat(batch_labels)))

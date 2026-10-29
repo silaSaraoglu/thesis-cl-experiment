@@ -21,7 +21,7 @@ import shared.utils
 
 from shared.dataset_cl import HHAR_CL
 from tasks.mnist.utils_single import accuracy
-from shared.metrics import CLMetrics, cohen_kappa
+from shared.metrics import CLMetrics, cohen_kappa, kappa_from_logits
 from models.LSTM.model import SingleHeadLSTM
 
 # HHAR tasks = device-model indices (0=nexus4, 1=s3, 2=s3mini, 3=samsungold)
@@ -75,6 +75,7 @@ def run_naive_lstm_hhar_sh(args, verbose = True, trial=None):
         hhar_test.choose_domain(task_order[task_id])
         loader_pt = DataLoader(hhar_test, batch_size=batch_size, shuffle=False, drop_last=False)
         metrics.record_pretrain(task_id, calculate_accuracy(model, loader_pt))
+        metrics.record_pretrain_kappa(task_id, kappa_from_logits(model, loader_pt, transform=None))
 
         for _ in range(epochs):
             model.train()

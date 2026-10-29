@@ -59,7 +59,7 @@ def run_joint_esn_hhar_sh(args, verbose = True):
     )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        hhar_train, hhar_test, task_order, max_samples, batch_size)
+        hhar_train, hhar_test, task_order, max_samples)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
     model     = SingleHeadESN(input_size=3, args=args, num_classes=6)

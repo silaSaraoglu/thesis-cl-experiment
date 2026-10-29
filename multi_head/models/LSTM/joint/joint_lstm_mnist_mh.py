@@ -11,14 +11,13 @@ import torch
 
 
 import torch.optim as optim
-import numpy as np
 from shared.utils import MNIST_PERM
 from torch.utils.data import DataLoader, TensorDataset
 
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import MNIST_CL
 from tasks.mnist.utils_single import accuracy
@@ -29,7 +28,7 @@ _TT = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
 _NUM_TASKS = 5
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -39,7 +38,7 @@ def calculate_accuracy(model, loader):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = _px(x).to(model.device)
+            x = px(x).to(model.device)
             y = y.to(model.device)
             batch_size = y.size(0)
             num_correct = num_correct + accuracy(model(x), y) * batch_size
@@ -80,9 +79,8 @@ def run_joint_lstm_mnist_mh(args, verbose = True):
         mnist_train.choose_subset(task_pairs[t])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
         for src, store in [(loader_train, train_datasets), (loader_val, val_datasets)]:
-            tmp = DataLoader(src.dataset, batch_size=256, shuffle=False, drop_last=False)
             batch_inputs, batch_labels = [], []
-            for x, y in tmp:
+            for x, y in src:   # train/val split only (respects sampler + subset)
                 batch_inputs.append(x)
                 batch_labels.append(y)
             store.append(TensorDataset(torch.cat(batch_inputs), torch.cat(batch_labels)))
@@ -103,7 +101,7 @@ def run_joint_lstm_mnist_mh(args, verbose = True):
         model.train()
         for task_id, (x, y) in all_batches:
             model.set_task(task_id)
-            x = _px(x).to(device)
+            x = px(x).to(device)
             y = y.to(device)
             optimizer.zero_grad()
             logits = model(x)
@@ -126,7 +124,7 @@ def run_joint_lstm_mnist_mh(args, verbose = True):
         model.eval()
         with torch.no_grad():
             for x, y in loader_test:
-                x = _px(x).to(device)
+                x = px(x).to(device)
                 preds = model(x).argmax(dim=1).cpu().numpy()
                 labels = y.numpy()
                 all_preds.extend(preds)

@@ -1,10 +1,9 @@
 """
 Single-Head (DIL) -- Phase-1 tuning, run once and cached.
 
-This script owns ALL tuning logic. It tunes the
-selected datasets and writes the best hyperparameters to tuned_params.json. run_experiment.py
-and run_epoch_analysis.py only READ that cache -- they contain no tuning code -- so tuning
-happens here once instead of at the start of every run.
+This script owns ALL tuning logic. It tunes the selected datasets and writes the best
+hyperparameters to tuned_params.json. run_experiment.py and run_epoch_analysis.py only READ
+that cache -- they contain no tuning code -- so tuning happens here once.
 
 """
 import warnings

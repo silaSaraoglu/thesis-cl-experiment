@@ -2,10 +2,13 @@
 LSTM with Experience Replay -- MNIST  (TIL Setting 2).
 
 CL strategy: Experience Replay.
-  A fixed-size buffer stores mem_size samples from all past tasks combined.
-  Each task slot gets mem_size // num_tasks_seen samples (balanced reservoir).
-  New-task training uses the concatenation of current-task data + buffer,
-  so the model sees old and new examples in every epoch.
+  A fixed-size (mem_size) balanced reservoir buffer, mirroring the ESN-Replay
+  path's Avalanche memory (ExperienceBalancedBuffer + reservoir sampling): the
+  buffer stays full and is split evenly across the tasks seen so far
+  (mem_size // k each after k tasks), so after task 1 it holds mem_size task-1
+  samples and each later task trims the earlier ones to make room. New-task
+  training uses the concatenation of current-task data + buffer, so the model
+  sees old and new examples in every epoch.
 
 Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
 Input: MNIST pixels row-by-row (B, 28, 28) — 28 time steps × 28 pixel features.
@@ -24,10 +27,11 @@ from torch.utils.data import DataLoader, TensorDataset
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import MNIST_CL
 from shared.metrics import CLMetrics, cohen_kappa
+from shared.replay_buffer import BalancedReservoirBuffer
 from models.LSTM.multi_head_lstm_model import MultiHeadLSTM
 
 _TT = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
@@ -35,7 +39,7 @@ _NUM_TASKS = 5
 
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -45,7 +49,7 @@ def calculate_accuracy(model, loader):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = _px(x).to(model.device)
+            x = px(x).to(model.device)
             y = y.to(model.device)
             preds = model(x).argmax(1)
             for i in range(len(preds)):
@@ -86,14 +90,23 @@ def run_lstm_replay_mnist_mh(args, verbose=True, trial=None):
     metrics = CLMetrics(num_tasks=_NUM_TASKS)
     subtask_val_accs = []
 
-    mem_size = 0  # set from first task's training data
-    buf = []  # list of (X, Y) per past task; total ≤ mem_size via reservoir sampling
+    # Size the replay buffer as the sum of 10% of each task's training split. The
+    # pre-pass only reads split *sizes*; get_train_val_loader draws its split from
+    # numpy's global RNG, so we snapshot/restore that state to leave the main loop's
+    # splits unchanged.
+    _rng_state = np.random.get_state()
+    mem_size = 0
+    for _tp in task_pairs:
+        mnist_train.choose_subset(_tp)
+        _lt, _ = mnist_train.get_train_val_loader(max_samples=max_samples)
+        mem_size += int(len(_lt.batch_sampler.sampler) * 0.1)
+    mem_size = max(1, mem_size)
+    np.random.set_state(_rng_state)
+    replay_buffer = BalancedReservoirBuffer(mem_size)  # mirrors the ESN-Replay (Avalanche) memory
 
     for task_id in range(_NUM_TASKS):
         mnist_train.choose_subset(task_pairs[task_id])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
-        if task_id == 0:
-            mem_size = max(1, int(len(loader_train.dataset) * _NUM_TASKS * 0.1))
 
         metrics.record_pretrain(task_id, 0.5)  # no head yet in MH before add_head
 
@@ -103,25 +116,41 @@ def run_lstm_replay_mnist_mh(args, verbose=True, trial=None):
 
         # Materialize current task's training data
         xs, ys = [], []
-        for x, y in DataLoader(loader_train.dataset, batch_size=256, shuffle=False, drop_last=False):
+        for x, y in loader_train:   # train split only (respects sampler + max_samples subset)
             xs.append(x)
             ys.append(y)
         cur_X, cur_Y = torch.cat(xs), torch.cat(ys)
 
-        # Build combined dataset: current task + replay buffer
-        all_X = torch.cat([cur_X] + [b[0] for b in buf])
-        all_Y = torch.cat([cur_Y] + [b[1] for b in buf])
+        # Combined dataset: current task (head=task_id) + replay buffer, with each
+        # sample tagged by the head of the task it came from, so multi-head replay
+        # routes every replayed sample through its own head (not the current one).
+        cur_T = torch.full((cur_X.size(0),), task_id, dtype=torch.long)
+        buf_X, buf_Y, buf_T = replay_buffer.data_with_tasks()
+        if buf_X is not None:
+            all_X = torch.cat([cur_X, buf_X])
+            all_Y = torch.cat([cur_Y, buf_Y])
+            all_T = torch.cat([cur_T, buf_T])
+        else:
+            all_X, all_Y, all_T = cur_X, cur_Y, cur_T
 
         combined_loader = DataLoader(
-            TensorDataset(all_X, all_Y), batch_size=batch_size, shuffle=True, drop_last=False)
+            TensorDataset(all_X, all_Y, all_T), batch_size=batch_size, shuffle=True, drop_last=False)
 
         for _ in range(epochs):
             model.train()
-            for x, y in combined_loader:
-                x = _px(x).to(device)
+            for x, y, t in combined_loader:
+                x = px(x).to(device)
                 y = y.to(device)
                 optimizer.zero_grad()
-                loss = criterion(model(x), y)
+                # Route each task's samples through its own head; weight per-head losses
+                # by sample count / batch size to match one mean-reduced CrossEntropy
+                # over the whole mini-batch.
+                loss = 0.0
+                for tid in torch.unique(t):
+                    m = (t == tid)
+                    model.set_task(int(tid))
+                    loss = loss + criterion(model(x[m]), y[m]) * int(m.sum())
+                loss = loss / x.size(0)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
@@ -133,9 +162,8 @@ def run_lstm_replay_mnist_mh(args, verbose=True, trial=None):
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
-        # Store fixed per-task quota: mem_size split equally across all tasks
-        perm = torch.randperm(cur_X.size(0))[:max(1, mem_size // _NUM_TASKS)]
-        buf.append((cur_X[perm], cur_Y[perm]))
+        # Reservoir update + rebalance (mirrors Avalanche ExperienceBalancedBuffer)
+        replay_buffer.update(cur_X, cur_Y, task_id)
 
         if verbose: print(f"  [After task {task_id+1}/{_NUM_TASKS}]")
         for eval_id in range(task_id + 1):
@@ -147,7 +175,7 @@ def run_lstm_replay_mnist_mh(args, verbose=True, trial=None):
             model.eval()
             with torch.no_grad():
                 for x, y in loader_te:
-                    x = _px(x).to(device)
+                    x = px(x).to(device)
                     preds = model(x).argmax(dim=1).cpu().numpy()
                     all_preds.extend(preds)
                     all_labels.extend(y.numpy())

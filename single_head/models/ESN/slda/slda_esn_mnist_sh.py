@@ -80,7 +80,7 @@ def run_esn_slda_mnist(args, verbose = True, trial=None):
 
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        mnist_train, mnist_test, task_pairs, max_samples, batch_size, reshape=True)
+        mnist_train, mnist_test, task_pairs, max_samples, reshape=True)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
     reservoir = SingleHeadESN(input_size=image_size, args=args)
@@ -107,10 +107,12 @@ def run_esn_slda_mnist(args, verbose = True, trial=None):
         # has no fitted LDA yet, so it stays at chance (FWT averages only j>0).
         if task_id == 0:
             metrics.record_pretrain(task_id, 0.5)
+            metrics.record_pretrain_kappa(task_id, 0.0)
         else:
             loader_pt = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False)
             pre_preds, pre_labels = predict(cl_strategy, loader_pt)
             metrics.record_pretrain(task_id, float((pre_preds == pre_labels).mean()))
+            metrics.record_pretrain_kappa(task_id, cohen_kappa(pre_labels, pre_preds))
 
         # Incrementally update the shared LDA with this task's data
         cl_strategy.train(exp)

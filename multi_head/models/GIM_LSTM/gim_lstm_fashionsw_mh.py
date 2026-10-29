@@ -1,21 +1,7 @@
-"""
-GIM Multi-Head experiment runner -- Sequential MNIST  (TIL Setting 2).
-
-GIM architecture is unchanged: modules grow task-by-task, one autoencoder
-per task is trained for reconstruction.
-
-The ONLY change from the SH version is test-time routing:
-  SH: test_autoencoder() picks the module with lowest AE reconstruction error
-  MH: oracle task ID is passed directly → module_id = eval_id
-
-Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
-Input: MNIST as row-based sequence (B, 28, 28) — 28 time steps × 28 pixel features.
-"""
 import os, sys
 import numpy as np
 import optuna
 
-import torch
 
 
 from argparse import Namespace
@@ -24,7 +10,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from tasks.mnist.utils_single import train, test, accuracy
@@ -36,32 +22,20 @@ _TT = [[0, 2], [3, 4], [5, 9]]
 _NUM_TASKS = 3
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
 def calculate_accuracy(train_models, variant, loader, device, output_size, module_id):
     num_correct, num_total = 0.0, 0
     for x, y in loader:
-        x = _px(x).to(device)
+        x = px(x).to(device)
         _, acc = test(train_models, variant, x, y, accuracy, device, output_size, module_id=module_id)
         num_correct += acc * y.size(0)
         num_total   += y.size(0)
     return num_correct / num_total
 
 def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
-    """
-    Train and evaluate one GIM run using oracle task routing (TIL).
-
-    Parameters
-    ----------
-    variant : 'alstm' or 'almn'
-
-    Returns
-    -------
-    val_accs, test_accs, metrics, train_models, train_autoencoders
-    """
-
 
     exp_args = Namespace(
         models=[variant],
@@ -81,7 +55,7 @@ def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
         lr_ae=1e-4,
         decay_ae=0.0,
         tasks=list(range(1, _NUM_TASKS + 1)),
-        cuda=args.device.type == 'cuda',
+        cuda=False,
         load=False,
         plot_folder="plots/tmp/",
     )
@@ -94,7 +68,6 @@ def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
     max_samples = args.subset
     task_pairs = getattr(args, 'task_pairs', _TT)
     batch_size = args.batch_size
-    image_size = 28
     epochs = args.epochs
     max_grad_norm = 5.0
     mnist_train = FashionMNISTSeason_CL(data_root, download=False, train=True,
@@ -119,7 +92,7 @@ def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
                                shuffle=False, drop_last=False)
         num_correct, num_total = 0.0, 0
         for x, y in loader_pt:
-            x = _px(x).to(device)
+            x = px(x).to(device)
             _, acc = test(train_models, variant, x, y, accuracy, device, 2, module_id=task_id)
             num_correct += acc * y.size(0)
             num_total += y.size(0)
@@ -127,7 +100,7 @@ def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
 
         for _ in range(epochs):
             for x, y in loader_train:
-                x = _px(x).to(device)
+                x = px(x).to(device)
                 train(train_models, variant, x, y, accuracy, device, 2, max_grad_norm)
 
         final_val_acc = calculate_accuracy(train_models, variant, loader_val, device, 2, task_id)
@@ -144,7 +117,7 @@ def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
                                      shuffle=False, drop_last=False)
             all_preds, all_labels = [], []
             for x, y in loader_test:
-                x = _px(x).to(device)
+                x = px(x).to(device)
                 # MH: oracle routing — use eval_id directly as module_id
                 preds = gim_predict(train_models, x, task_id=eval_id)
                 all_preds.extend(preds)
@@ -162,23 +135,16 @@ def run_gim_fashionsw_mh(variant, args, verbose = True, trial=None):
                 print(f"Task {eval_id+1} acc={acc:.4f}  kappa={kappa:.4f}")
 
         if task_id < _NUM_TASKS - 1 and final_val_acc < 1.01:
-            if variant == "almn":
-                n = len(train_models["almn"][0].lmns)
-                if verbose:
-                    print(f"  [GIM-ALMN MH] Added module {n+1} for task {task_id+1} "
-                          f"(val_acc {final_val_acc:.3f} < 1.01)")
-                train_models["almn"][0].add_new_module(train_models["almn"][1])
-            else:
-                n = len(train_models["alstm"][0].lstms)
-                if verbose:
-                    print(f"  [GIM-ALSTM MH] Added module {n+1} for task {task_id+1} "
-                          f"(val_acc {final_val_acc:.3f} < 1.01)")
-                train_models["alstm"][0].add_new_module(train_models["alstm"][1])
+            n = len(train_models["alstm"][0].lstms)
+            if verbose:
+                print(f"  [GIM-ALSTM MH] Added module {n+1} for task {task_id+1} "
+                      f"(val_acc {final_val_acc:.3f} < 1.01)")
+            train_models["alstm"][0].add_new_module(train_models["alstm"][1])
 
     test_accs = [metrics.R[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]
     if verbose:
         print()
-        print(f"  MNIST results  --  GIM-{variant.upper()} MH (oracle routing)")
+        print(f"  Fashion-SW results  --  GIM-{variant.upper()} MH (oracle routing)")
         print(f"  Validation : {[round(v,4) for v in subtask_val_accs]}")
         print(f"  Test       : {[round(t,4) for t in test_accs]}")
     return subtask_val_accs, test_accs, metrics, train_models, train_autoencoders

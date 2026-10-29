@@ -66,7 +66,7 @@ def run_joint_esn_mnist_sh(args, verbose = True):
 
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        mnist_train, mnist_test, task_pairs, max_samples, batch_size, reshape=True)
+        mnist_train, mnist_test, task_pairs, max_samples, reshape=True)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
     model = SingleHeadESN(input_size=image_size, args=args)

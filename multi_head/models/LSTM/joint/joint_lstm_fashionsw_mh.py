@@ -1,9 +1,10 @@
 """
-Joint Multi-Head LSTM -- MNIST  (TIL Setting 2, upper bound).
+Joint Multi-Head LSTM -- Fashion-MNIST (summer-vs-winter)  (TIL Setting 2, upper bound).
 
 All task heads added upfront; shared body + all heads trained simultaneously
 each epoch — oracle upper bound with no forgetting.
-Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
+Tasks: 3 binary summer-vs-winter tasks within a garment category
+(Tshirt/Pullover, Dress/Coat, Sandal/Ankle-boot).
 """
 import os, sys, random
 import torch
@@ -11,14 +12,13 @@ import torch
 
 
 import torch.optim as optim
-import numpy as np
 from shared.utils import MNIST_PERM
 from torch.utils.data import DataLoader, TensorDataset
 
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from tasks.mnist.utils_single import accuracy
@@ -29,7 +29,7 @@ _TT = [[0, 2], [3, 4], [5, 9]]
 _NUM_TASKS = 3
 
 
-def _px(x):
+def px(x):
     # permuted MNIST from GIM paper, kept as (B,28,28)
     return x.reshape(x.size(0), -1)[:, MNIST_PERM].reshape(x.size(0), 28, 28)
 
@@ -39,7 +39,7 @@ def calculate_accuracy(model, loader):
     model.eval()
     with torch.no_grad():
         for x, y in loader:
-            x = _px(x).to(model.device)
+            x = px(x).to(model.device)
             y = y.to(model.device)
             batch_size = y.size(0)
             num_correct = num_correct + accuracy(model(x), y) * batch_size
@@ -47,7 +47,7 @@ def calculate_accuracy(model, loader):
     return num_correct / num_total
 
 def run_joint_lstm_fashionsw_mh(args, verbose = True):
-    """Joint Multi-Head LSTM on MNIST. Returns val_accs, test_accs, metrics, model, []."""
+    """Joint Multi-Head LSTM on Fashion-SW. Returns val_accs, test_accs, metrics, model, []."""
 
 
     device = args.device
@@ -80,9 +80,8 @@ def run_joint_lstm_fashionsw_mh(args, verbose = True):
         mnist_train.choose_subset(task_pairs[t])
         loader_train, loader_val = mnist_train.get_train_val_loader(max_samples=max_samples)
         for src, store in [(loader_train, train_datasets), (loader_val, val_datasets)]:
-            tmp = DataLoader(src.dataset, batch_size=256, shuffle=False, drop_last=False)
             batch_inputs, batch_labels = [], []
-            for x, y in tmp:
+            for x, y in src:   # train/val split only (respects sampler + subset)
                 batch_inputs.append(x)
                 batch_labels.append(y)
             store.append(TensorDataset(torch.cat(batch_inputs), torch.cat(batch_labels)))
@@ -103,7 +102,7 @@ def run_joint_lstm_fashionsw_mh(args, verbose = True):
         model.train()
         for task_id, (x, y) in all_batches:
             model.set_task(task_id)
-            x = _px(x).to(device)
+            x = px(x).to(device)
             y = y.to(device)
             optimizer.zero_grad()
             logits = model(x)
@@ -126,7 +125,7 @@ def run_joint_lstm_fashionsw_mh(args, verbose = True):
         model.eval()
         with torch.no_grad():
             for x, y in loader_test:
-                x = _px(x).to(device)
+                x = px(x).to(device)
                 preds = model(x).argmax(dim=1).cpu().numpy()
                 labels = y.numpy()
                 all_preds.extend(preds)
@@ -153,7 +152,7 @@ def run_joint_lstm_fashionsw_mh(args, verbose = True):
         acc_final = float(acc_final / _NUM_TASKS)
         avg_kappa = float(avg_kappa / _NUM_TASKS)
         print()
-        print("  MNIST results  --  LSTM MH (Joint)  [oracle upper bound]")
+        print("  Fashion-SW results  --  LSTM MH (Joint)  [oracle upper bound]")
         print("  NOTE: Only ACC_final and Cohen's kappa are valid for joint training.")
         print("  ACC_avg, BWT, FWT, Plasticity and Stability require sequential")
         print("  task evaluation (full R-matrix) and are not reported.")

@@ -33,7 +33,7 @@ if _p not in sys.path: sys.path.insert(0, _p)
 import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
-from shared.metrics import CLMetrics, cohen_kappa
+from shared.metrics import CLMetrics, cohen_kappa, kappa_from_predict
 from models.ESN.esn_utils import SingleHeadESN
 from shared.utils import collect_datasets
 from clrnn.utils import get_strategy
@@ -80,7 +80,7 @@ def run_esn_replay_fashionsw(args, verbose = True, trial=None):
 
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        mnist_train, mnist_test, task_pairs, max_samples, batch_size, reshape=True)
+        mnist_train, mnist_test, task_pairs, max_samples, reshape=True)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
     model = SingleHeadESN(input_size=image_size, args=args)
@@ -99,6 +99,7 @@ def run_esn_replay_fashionsw(args, verbose = True, trial=None):
         # Pre-task accuracy (for FWT)
         loader_pt = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False)
         metrics.record_pretrain(task_id, calculate_accuracy(model, loader_pt))
+        metrics.record_pretrain_kappa(task_id, kappa_from_predict(model, loader_pt))
 
         # Avalanche Replay: mixes current task data with buffered past samples each batch
         cl_strategy.train(exp)

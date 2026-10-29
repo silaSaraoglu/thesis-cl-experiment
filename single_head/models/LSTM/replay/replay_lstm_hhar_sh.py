@@ -21,7 +21,7 @@ import shared.utils
 
 from shared.dataset_cl import HHAR_CL
 from tasks.mnist.utils_single import accuracy
-from shared.metrics import CLMetrics, cohen_kappa
+from shared.metrics import CLMetrics, cohen_kappa, kappa_from_logits
 from shared.replay_buffer import BalancedReservoirBuffer
 from models.LSTM.model import SingleHeadLSTM
 
@@ -70,11 +70,9 @@ def run_lstm_replay_hhar_sh(args, verbose=True, trial=None):
     subtask_val_accs = []
 
     # Size the replay buffer like the ESN-Replay path: the sum of 10% of each
-    # task's training split, not task-0 x num_tasks (which assumes all tasks are
-    # the same size -- false for HHAR's unequally sized device-tasks). The
-    # pre-pass only reads split *sizes*; get_train_val_loader draws its split from
-    # numpy's global RNG, so we snapshot/restore that state to leave the actual
-    # splits in the main loop unchanged.
+    # task's training split. The pre-pass only reads split *sizes*; get_train_val_loader
+    # draws its split from numpy's global RNG, so we snapshot/restore that state
+    # to leave the actual splits in the main loop unchanged.
     _rng_state = np.random.get_state()
     mem_size = 0
     for _dom in task_order:
@@ -93,6 +91,7 @@ def run_lstm_replay_hhar_sh(args, verbose=True, trial=None):
         loader_pt = DataLoader(hhar_test, batch_size=batch_size,
                                shuffle=False, drop_last=False)
         metrics.record_pretrain(task_id, calculate_accuracy(model, loader_pt))
+        metrics.record_pretrain_kappa(task_id, kappa_from_logits(model, loader_pt, transform=None))
 
         xs, ys = [], []
         for x, y in loader_train:   # train split only (respects sampler + max_samples subset)

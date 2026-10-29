@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import WISDM_CL
 from shared.metrics import CLMetrics, cohen_kappa
@@ -63,7 +63,7 @@ def run_esn_naive_wisdm_mh(args, verbose = True, trial=None):
     )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        wisdm_train, wisdm_test, task_pairs, max_samples, batch_size)
+        wisdm_train, wisdm_test, task_pairs, max_samples)
 
     model = MultiHeadESN(input_size=3, args=args, device=device)
     criterion = nn.CrossEntropyLoss()

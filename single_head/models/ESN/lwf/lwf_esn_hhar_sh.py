@@ -18,7 +18,7 @@ if _p not in sys.path: sys.path.insert(0, _p)
 import shared.utils
 
 from shared.dataset_cl import HHAR_CL
-from shared.metrics import CLMetrics, cohen_kappa
+from shared.metrics import CLMetrics, cohen_kappa, kappa_from_predict
 from models.ESN.esn_utils import SingleHeadESN
 from shared.utils import collect_datasets
 from clrnn.utils import get_strategy
@@ -59,7 +59,7 @@ def run_esn_lwf_hhar(args, verbose = True, trial=None):
     )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        hhar_train, hhar_test, task_order, max_samples, batch_size)
+        hhar_train, hhar_test, task_order, max_samples)
     scenario = dataset_benchmark(train_datasets, test_datasets)
 
     model     = SingleHeadESN(input_size=3, args=args, num_classes=6)
@@ -76,6 +76,7 @@ def run_esn_lwf_hhar(args, verbose = True, trial=None):
 
         loader_pt = DataLoader(test_datasets[task_id], batch_size=batch_size, shuffle=False)
         metrics.record_pretrain(task_id, calculate_accuracy(model, loader_pt))
+        metrics.record_pretrain_kappa(task_id, kappa_from_predict(model, loader_pt))
 
         cl_strategy.train(exp)
 

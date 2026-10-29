@@ -1,0 +1,131 @@
+{
+  "meta": {
+    "seed": 42
+  },
+  "params": {
+    "esn_naive_mh::fashion_sw": {
+      "batch_size": 32,
+      "esn_units": 1000,
+      "learning_rate": 0.1
+    },
+    "esn_naive_mh::hhar": {
+      "batch_size": 16,
+      "esn_units": 300,
+      "learning_rate": 0.001
+    },
+    "esn_naive_mh::mnist": {
+      "batch_size": 16,
+      "esn_units": 1000,
+      "learning_rate": 0.01
+    },
+    "esn_naive_mh::wisdm": {
+      "batch_size": 32,
+      "esn_units": 300,
+      "learning_rate": 0.1
+    },
+    "gim_alstm_mh::fashion_sw": {
+      "batch_size": 16,
+      "hidden_size_autoencoder": 500,
+      "hidden_size_rnn": 32,
+      "learning_rate": 0.01
+    },
+    "gim_alstm_mh::hhar": {
+      "batch_size": 16,
+      "hidden_size_autoencoder": 300,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.01
+    },
+    "gim_alstm_mh::mnist": {
+      "batch_size": 32,
+      "hidden_size_autoencoder": 500,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.0001
+    },
+    "gim_alstm_mh::wisdm": {
+      "batch_size": 16,
+      "hidden_size_autoencoder": 300,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.01
+    },
+    "joint_esn_mh::fashion_sw": {
+      "batch_size": 16,
+      "esn_units": 1000,
+      "learning_rate": 0.01
+    },
+    "joint_esn_mh::hhar": {
+      "batch_size": 64,
+      "esn_units": 500,
+      "learning_rate": 0.01
+    },
+    "joint_esn_mh::mnist": {
+      "batch_size": 32,
+      "esn_units": 300,
+      "learning_rate": 0.1
+    },
+    "joint_esn_mh::wisdm": {
+      "batch_size": 16,
+      "esn_units": 1000,
+      "learning_rate": 0.01
+    },
+    "joint_lstm_mh::fashion_sw": {
+      "batch_size": 16,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.001
+    },
+    "joint_lstm_mh::hhar": {
+      "batch_size": 32,
+      "hidden_size_rnn": 32,
+      "learning_rate": 0.01
+    },
+    "joint_lstm_mh::mnist": {
+      "batch_size": 64,
+      "hidden_size_rnn": 32,
+      "learning_rate": 0.01
+    },
+    "joint_lstm_mh::wisdm": {
+      "batch_size": 32,
+      "hidden_size_rnn": 256,
+      "learning_rate": 0.1
+    },
+    "lstm_mh::fashion_sw": {
+      "batch_size": 32,
+      "hidden_size_rnn": 32,
+      "learning_rate": 0.01
+    },
+    "lstm_mh::hhar": {
+      "batch_size": 16,
+      "hidden_size_rnn": 64,
+      "learning_rate": 0.1
+    },
+    "lstm_mh::mnist": {
+      "batch_size": 32,
+      "hidden_size_rnn": 256,
+      "learning_rate": 0.01
+    },
+    "lstm_mh::wisdm": {
+      "batch_size": 64,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.01
+    },
+    "lstm_replay_mh::fashion_sw": {
+      "batch_size": 32,
+      "hidden_size_rnn": 32,
+      "learning_rate": 0.01
+    },
+    "lstm_replay_mh::hhar": {
+      "batch_size": 64,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.01
+    },
+    "lstm_replay_mh::mnist": {
+      "batch_size": 32,
+      "hidden_size_rnn": 32,
+      "learning_rate": 0.01
+    },
+    "lstm_replay_mh::wisdm": {
+      "batch_size": 64,
+      "hidden_size_rnn": 128,
+      "learning_rate": 0.01
+    }
+  }
+}

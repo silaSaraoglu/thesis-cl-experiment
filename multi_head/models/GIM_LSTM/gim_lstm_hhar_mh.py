@@ -1,10 +1,3 @@
-"""
-GIM Multi-Head experiment runner -- HHAR  (TIL Setting 2).
-
-GIM architecture unchanged: one module grown per device-task.
-Test-time routing uses the ORACLE device ID (module_id=eval_id), not AE error.
-Tasks = device models; output_size=6, input_size=3. Input: (B, 128, 3).
-"""
 import os, sys
 import optuna
 import numpy as np
@@ -14,7 +7,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import HHAR_CL
 from tasks.mnist.utils_single import train, test, accuracy
@@ -36,7 +29,6 @@ def calculate_accuracy(train_models, variant, loader, device, output_size, modul
     return num_correct / num_total
 
 def run_gim_hhar_mh(variant, args, verbose = True, trial=None):
-    """Train and evaluate one GIM run on HHAR using oracle device routing (TIL)."""
     data_root   = args.data_dir
     max_samples = args.subset
     task_order  = getattr(args, 'task_pairs', _TASKS)
@@ -62,7 +54,7 @@ def run_gim_hhar_mh(variant, args, verbose = True, trial=None):
         lr_ae=1e-4,
         decay_ae=0.0,
         tasks=list(range(1, _NUM_TASKS + 1)),
-        cuda=args.device.type == 'cuda',
+        cuda=False,
         load=False,
         plot_folder="plots/tmp/",
     )
@@ -139,16 +131,10 @@ def run_gim_hhar_mh(variant, args, verbose = True, trial=None):
                 print(f"    task {eval_id+1} [{eval_name}] acc={acc:.4f}  kappa={kappa:.4f}")
 
         if task_id < _NUM_TASKS - 1 and final_val_acc < 1.01:
-            if variant == "almn":
-                n = len(train_models["almn"][0].lmns)
-                if verbose:
-                    print(f"  [GIM-ALMN MH] Added module {n+1} for task {task_id+1}")
-                train_models["almn"][0].add_new_module(train_models["almn"][1])
-            else:
-                n = len(train_models["alstm"][0].lstms)
-                if verbose:
-                    print(f"  [GIM-ALSTM MH] Added module {n+1} for task {task_id+1}")
-                train_models["alstm"][0].add_new_module(train_models["alstm"][1])
+            n = len(train_models["alstm"][0].lstms)
+            if verbose:
+                print(f"  [GIM-ALSTM MH] Added module {n+1} for task {task_id+1}")
+            train_models["alstm"][0].add_new_module(train_models["alstm"][1])
 
     test_accs = [metrics.R[_NUM_TASKS-1].get(j, 0.0) for j in range(_NUM_TASKS)]
     if verbose:

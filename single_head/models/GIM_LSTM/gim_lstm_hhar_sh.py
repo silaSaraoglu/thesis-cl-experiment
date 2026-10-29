@@ -15,7 +15,7 @@ from shared.dataset_cl import HHAR_CL
 from tasks.mnist.utils_single import train, test, accuracy, train_autoencoder, test_autoencoder
 from experiment.CL_experiment import CL_Experiment
 from shared.metrics import CLMetrics, cohen_kappa
-from shared.utils import gim_predict
+from shared.utils import gim_predict, gim_kappa_over_loader
 
 _TASKS     = [0, 1, 2, 3]   # device-model indices
 _NUM_TASKS = 4
@@ -93,6 +93,7 @@ def run_gim_hhar(variant, args, verbose = True, trial=None):
         loader_pt = DataLoader(hhar_test, batch_size=batch_size,
                                shuffle=False, drop_last=False)
         metrics.record_pretrain(task_id, calculate_accuracy(train_models, variant, loader_pt, device, output_size))
+        metrics.record_pretrain_kappa(task_id, gim_kappa_over_loader(train_models, loader_pt, transform=None))
 
         for _ in range(epochs):
             for x, y in loader_train:

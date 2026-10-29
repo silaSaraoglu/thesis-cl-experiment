@@ -47,6 +47,11 @@ from models.ESN.replay.replay_esn_fashionsw_sh import run_esn_replay_fashionsw
 from models.ESN.slda.slda_esn_fashionsw_sh import run_esn_slda_fashionsw
 from shared.metrics import save_results
 from shared.utils import load_tuned_params
+from shared.plot_style import (
+    FS_ANNOT, FS_LEGEND, FS_SUPTITLE, FS_TICK, FS_TITLE,
+    apply_thesis_style, config_colors, fig_size, grid_size, label_bars,
+    model_legend, save_fig, zero_bar_stubs,
+)
 
 
 from config import *
@@ -141,16 +146,28 @@ def cfg_summary(r, cfg):
 def cfg_R(r, cfg):
     return r["per_config"][cfg]["R_matrix"]
 
+def cfg_K(r, cfg):
+    """Task x task Kappa matrix; {} if it was not recorded."""
+    return r["per_config"][cfg].get("K_matrix", {})
+
 def cfg_test(r, cfg):
     return r["per_config"][cfg]["test"]
 
 def cfg_pretrain(r, cfg):
     return r["per_config"][cfg].get("pretrain", {})
 
+def cfg_pretrain_kappa(r, cfg):
+    return r["per_config"][cfg].get("pretrain_kappa", {})
+
 def agg_metric(r, key):
+    """Mean and std of ``key`` across a result's task-configs; (None, None) if absent.
+    Mirrors shared.epoch_analysis.mean_std so the main experiment and the epoch sweep
+    aggregate configs the same way."""
     pc = r.get("per_config") or {}
     vals = [c["summary"].get(key) for c in pc.values()]
     vals = [v for v in vals if v is not None]
+    if not vals:
+        return None, None
     return float(np.mean(vals)), float(np.std(vals))
 
 def fig_footer(fig, all_results):
@@ -162,13 +179,11 @@ def fig_footer(fig, all_results):
                       for d in ds_ids)
     tune  = ", ".join(f"{DATASET_LABEL[d]}={TUNE_SUBSET_BY_DATASET[d]}" for d in ds_ids)
     fig.text(0.5, 0.002, f"Train subset: {train}  |  Tune subset: {tune}",
-             ha="center", va="bottom", fontsize=7, color="#777777", style="italic")
+             ha="center", va="bottom", fontsize=FS_FOOTER, color="#777777", style="italic")
 
 
 def run_combination(dataset, model, model_dataset_params,
                     exp_dir, epochs, config_names=None):
-    # Runs are executed sequentially (one combination at a time), so let torch use all
-    # available CPU cores for each run instead of capping it to a single thread.
     meta          = TASK_META[dataset]
     task_names    = meta.get("task_names", {})
     runner        = RUNNERS[(dataset, model)]
@@ -196,7 +211,13 @@ def run_combination(dataset, model, model_dataset_params,
             "summary": result[2].summary(chance),
             "R_matrix": {str(i): {str(j): v for j, v in d.items()}
                          for i, d in result[2].R.items()},
+            # Kappa counterpart of R_matrix: every model records a Kappa per
+            # (after_task, eval_task), so persisting it keeps the whole Kappa metric
+            # suite recomputable from the JSONs without re-training.
+            "K_matrix": {str(i): {str(j): v for j, v in d.items()}
+                         for i, d in result[2].K.items()},
             "pretrain": {str(k): float(v) for k, v in result[2].pretrain.items()},
+            "pretrain_kappa": {str(k): float(v) for k, v in result[2].pretrain_K.items()},
             "task_pairs": disp_pairs(task_pairs, task_names),
         }
 
@@ -309,8 +330,8 @@ def save_plots(all_results, results_dir):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    apply_thesis_style()
     COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    plt.rcParams.update({"font.size": 9, "axes.titlesize": 9})
 
     plots_dir = os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
@@ -331,6 +352,34 @@ def save_plots(all_results, results_dir):
         ("Stability",              "mean off-diag (i>j)"),
     ]
 
+    # Kappa-valued counterparts, computed from the K-matrix exactly as the accuracy
+    # metrics are from the R-matrix. Same panel order as above so the accuracy figure
+    # and the Kappa figure can be read side by side. Kappa is already chance-corrected,
+    # so the FWT baseline is 0 rather than the 1/num_classes used above.
+    kappa_metric_keys = [
+        "final_cohen_kappa", "average_kappa_over_time",
+        "final_backward_transfer_kappa", "average_backward_transfer_kappa",
+        "forward_transfer_kappa", "plasticity_kappa", "stability_kappa",
+    ]
+    kappa_metric_titles = [
+        ("Final Kappa",           "mean K[T-1][j] over all j"),
+        ("Avg Kappa Over Time",   "mean K[i][j] for all i>=j"),
+        ("Final BWT (Kappa)",     "mean(K[T-1][j]-K[j][j]) for j<T-1"),
+        ("Avg BWT (Kappa)",       "mean(K[i][j]-K[j][j]) for all i>j"),
+        ("Forward Transfer (Kappa)", "mean pretrain kappa(j) for j>0"),
+        ("Plasticity (Kappa)",    "mean diagonal K[j][j]"),
+        ("Stability (Kappa)",     "mean off-diag (i>j)"),
+    ]
+
+    # (keys, titles, filename, figure title, probe key) -- one figure per set; a set is
+    # skipped when its probe key is missing from the results.
+    metric_sets = [
+        (metric_keys,       metric_titles,       "metrics.png",
+         "CL Metrics",                 "final_accuracy"),
+        (kappa_metric_keys, kappa_metric_titles, "metrics_kappa.png",
+         "CL Metrics (Cohen's Kappa)", "average_kappa_over_time"),
+    ]
+
     for ds in sorted(set(r["dataset"] for r in all_results)):
         ds_rs   = [r for r in all_results if r["dataset"] == ds]
         ds_slug = ds.lower().replace("-", "_").replace(" ", "")
@@ -340,59 +389,65 @@ def save_plots(all_results, results_dir):
         for cfg in cfgs:
             cdir  = os.path.join(plots_dir, ds_slug, cfg)
             rdir  = os.path.join(cdir, "rmatrix")
+            kdir  = os.path.join(cdir, "kmatrix")
             os.makedirs(rdir, exist_ok=True)
+            os.makedirs(kdir, exist_ok=True)
 
             task_names = [pair_lbl(p) for p in ds_rs[0]["per_config"][cfg].get("task_pairs", [])]
             n_tasks = len(task_names)
             labels  = [r["model"] for r in ds_rs]
             tag     = f"  [{cfg}]"
 
-            # 1) CL-metrics overview (only models that define each metric)
-            fig, axes = plt.subplots(2, 4, figsize=(20, 8))
-            fig.suptitle(f"CL Metrics -- {ds}{tag}", fontsize=12, fontweight="bold")
-            for ax, key, (title, defn) in zip(axes.flat, metric_keys, metric_titles):
-                dm = [(lab, cfg_summary(r, cfg).get(key), COLORS[i % len(COLORS)])
-                      for i, (lab, r) in enumerate(zip(labels, ds_rs))
-                      if cfg_summary(r, cfg).get(key) is not None]
-                ax.set_title(f"{title}\n[{defn}]", fontsize=8, pad=4)
-                ax.axhline(0, color="gray", linewidth=0.6, linestyle="--")
-                if not dm:
-                    ax.set_xticks([]); ax.set_ylim(-0.05, 0.05)
-                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
-                            transform=ax.transAxes, fontsize=9, color="#999999")
-                    continue
-                sl = [d[0] for d in dm]; sv = [d[1] for d in dm]; sc = [d[2] for d in dm]
-                xs = np.arange(len(dm))
-                bars = ax.bar(xs, sv, color=sc, edgecolor="white", linewidth=0.5)
-                ax.set_xticks(xs); ax.set_xticklabels(sl, rotation=40, ha="right", fontsize=7)
-                ymin = min(min(sv) - 0.05, -0.05); ymax = max(max(sv) + 0.05, 0.05)
-                ax.set_ylim(ymin, ymax)
-                if key in ("final_backward_transfer", "average_backward_transfer", "forward_transfer"):
-                    ax.axhspan(0, ymax, alpha=0.07, color="green", zorder=0)
-                    ax.axhspan(ymin, 0, alpha=0.07, color="red", zorder=0)
-                for bar, v in zip(bars, sv):
-                    va = "bottom" if v >= 0 else "top"; off = 0.01 if v >= 0 else -0.02
-                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + off,
-                            f"{v:.2f}", ha="center", va=va, fontsize=6)
-            plt.tight_layout(); fig_footer(fig, all_results)
-            fig.savefig(os.path.join(cdir, "metrics.png"), dpi=150, bbox_inches="tight")
-            plt.close(fig)
+            # 1) CL-metrics overview (only models that define each metric).
+            # 4x2 rather than 2x4: at 16 cm text width, 4 columns leave each panel
+            # 4 cm wide and the rotated model labels collide.
+            # Emitted twice: once for the accuracy suite, once for the Kappa suite.
+            for mkeys, mtitles, mfile, mtitle, mprobe in metric_sets:
+                if not any(cfg_summary(r, cfg).get(mprobe) is not None for r in ds_rs):
+                    continue          # set not recorded in this run
+                fig, axes = plt.subplots(4, 2, figsize=grid_size(4, 2, panel_aspect=0.62))
+                fig.suptitle(f"{mtitle} -- {ds}{tag}", fontsize=FS_SUPTITLE, fontweight="bold")
+                for ax, key, (title, defn) in zip(axes.flat, mkeys, mtitles):
+                    dm = [(lab, cfg_summary(r, cfg).get(key), COLORS[i % len(COLORS)])
+                          for i, (lab, r) in enumerate(zip(labels, ds_rs))
+                          if cfg_summary(r, cfg).get(key) is not None]
+                    ax.set_title(title, fontsize=FS_TITLE, pad=3)
+                    ax.axhline(0, color="gray", linewidth=0.6, linestyle="--")
+                    if not dm:
+                        ax.set_xticks([]); ax.set_ylim(-0.05, 0.05)
+                        ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                                transform=ax.transAxes, fontsize=FS_TICK, color="#999999")
+                        continue
+                    sv = [d[1] for d in dm]; sc = [d[2] for d in dm]
+                    xs = np.arange(len(dm))
+                    ax.bar(xs, sv, color=sc, edgecolor="white", linewidth=0.5)
+                    ax.set_xticks([])
+                    ymin, ymax = label_bars(ax, xs, sv, colors=sc)
+                    if "transfer" in key:        # forward/backward, accuracy or Kappa
+                        ax.axhspan(0, ymax, alpha=0.07, color="green", zorder=0)
+                        ax.axhspan(ymin, 0, alpha=0.07, color="red", zorder=0)
+                for ax in axes.flat[len(mkeys):]:   # hide unused subplot(s)
+                    ax.set_visible(False)
+                model_legend(fig, labels, [COLORS[i % len(COLORS)] for i in range(len(labels))])
+                plt.tight_layout(rect=[0, 0, 1, 0.93])
+                save_fig(fig, os.path.join(cdir, mfile))
+                plt.close(fig)
 
             # 2) per-task final test accuracy
             xt = np.arange(n_tasks); width = 0.8 / max(len(ds_rs), 1)
-            fig, ax = plt.subplots(figsize=(max(8, n_tasks * len(ds_rs) * 0.35 + 2), 5))
+            fig, ax = plt.subplots(figsize=fig_size(aspect=0.55))
             for i, r in enumerate(ds_rs):
                 off = (i - len(ds_rs) / 2 + 0.5) * width
                 ax.bar(xt + off, cfg_test(r, cfg), width, label=r["model"],
                        color=COLORS[i % len(COLORS)], edgecolor="white", linewidth=0.4)
-            ax.set_xticks(xt); ax.set_xticklabels(task_names, fontsize=8)
+            ax.set_xticks(xt); ax.set_xticklabels(task_names, fontsize=FS_TICK)
             ax.set_ylabel("Test Accuracy")
-            ax.set_title(f"Per-Task Final Test Accuracy -- {ds}{tag}\n[R[T-1][j]]", fontweight="bold")
-            ax.set_ylim(0, 1.05)
+            ax.set_title(f"Per-Task Final Test Accuracy -- {ds}{tag}", fontweight="bold")
+            ax.set_ylim(0, 1.32)
             ax.axhline(chance, color="gray", linewidth=0.6, linestyle="--", label="chance")
-            ax.legend(fontsize=7, ncol=3, loc="upper right")
-            plt.tight_layout(); fig_footer(fig, all_results)
-            fig.savefig(os.path.join(cdir, "per_task.png"), dpi=150, bbox_inches="tight")
+            ax.legend(fontsize=FS_LEGEND, ncol=3, loc="upper right")
+            plt.tight_layout()
+            save_fig(fig, os.path.join(cdir, "per_task.png"))
             plt.close(fig)
 
             seq = [r for r in ds_rs if len(cfg_R(r, cfg)) > 1]
@@ -400,9 +455,8 @@ def save_plots(all_results, results_dir):
             # 3a) per-task average accuracy
             if seq:
                 w = 0.8 / len(seq)
-                fig, ax = plt.subplots(figsize=(max(8, n_tasks * len(seq) * 0.35 + 2), 5))
-                ax.set_title(f"Per-Task Average Accuracy -- {ds}{tag}\n"
-                             "[avg_acc_j = mean(R[i][j] for i>=j)]", fontweight="bold")
+                fig, ax = plt.subplots(figsize=fig_size(aspect=0.55))
+                ax.set_title(f"Per-Task Average Accuracy -- {ds}{tag}", fontweight="bold")
                 for i, r in enumerate(seq):
                     R = cfg_R(r, cfg); T = max(int(k) for k in R) + 1; avgs = []
                     for j in range(T):
@@ -412,12 +466,12 @@ def save_plots(all_results, results_dir):
                     off = (i - len(seq) / 2 + 0.5) * w
                     ax.bar(np.arange(T) + off, avgs, w, label=r["model"],
                            color=COLORS[i % len(COLORS)], edgecolor="white", linewidth=0.4)
-                ax.set_xticks(np.arange(n_tasks)); ax.set_xticklabels(task_names, fontsize=8)
-                ax.set_ylabel("Average Accuracy"); ax.set_ylim(0, 1.05)
+                ax.set_xticks(np.arange(n_tasks)); ax.set_xticklabels(task_names, fontsize=FS_TICK)
+                ax.set_ylabel("Average Accuracy"); ax.set_ylim(0, 1.32)
                 ax.axhline(chance, color="gray", linewidth=0.6, linestyle="--", label="chance")
-                ax.legend(fontsize=7, ncol=3, loc="upper right")
-                plt.tight_layout(); fig_footer(fig, all_results)
-                fig.savefig(os.path.join(cdir, "per_task_avg_acc.png"), dpi=150, bbox_inches="tight")
+                ax.legend(fontsize=FS_LEGEND, ncol=3, loc="upper right")
+                plt.tight_layout()
+                save_fig(fig, os.path.join(cdir, "per_task_avg_acc.png"))
                 plt.close(fig)
 
             # 3b) per-task backward transfer
@@ -430,21 +484,20 @@ def save_plots(all_results, results_dir):
                         b.append((rTj - rjj) if (rTj is not None and rjj is not None) else 0.0)
                     per.append(b); allb.extend(b)
                 ymin = min(min(allb) - 0.05, -0.05); ymax = max(max(allb) + 0.05, 0.05)
-                fig, ax = plt.subplots(figsize=(max(8, (n_tasks - 1) * len(seq) * 0.35 + 2), 5))
-                ax.set_title(f"Per-Task Backward Transfer -- {ds}{tag}\n"
-                             "[BWT_j = R[T-1][j]-R[j][j]]", fontweight="bold")
+                fig, ax = plt.subplots(figsize=fig_size(aspect=0.55))
+                ax.set_title(f"Per-Task Backward Transfer -- {ds}{tag}", fontweight="bold")
                 ax.axhspan(0, ymax, alpha=0.07, color="green", zorder=0)
                 ax.axhspan(ymin, 0, alpha=0.07, color="red", zorder=0)
                 for i, (r, b) in enumerate(zip(seq, per)):
                     off = (i - len(seq) / 2 + 0.5) * w
                     ax.bar(xb[:len(b)] + off, b, w, label=r["model"],
                            color=COLORS[i % len(COLORS)], edgecolor="white", linewidth=0.4)
-                ax.set_xticks(xb); ax.set_xticklabels(task_names[:n_tasks - 1], fontsize=8)
+                ax.set_xticks(xb); ax.set_xticklabels(task_names[:n_tasks - 1], fontsize=FS_TICK)
                 ax.set_ylabel("BWT"); ax.set_ylim(ymin, ymax)
                 ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
-                ax.legend(fontsize=7, ncol=3, loc="upper right")
-                plt.tight_layout(); fig_footer(fig, all_results)
-                fig.savefig(os.path.join(cdir, "per_task_bwt.png"), dpi=150, bbox_inches="tight")
+                ax.legend(fontsize=FS_LEGEND, ncol=3, loc="upper right")
+                plt.tight_layout()
+                save_fig(fig, os.path.join(cdir, "per_task_bwt.png"))
                 plt.close(fig)
 
             # 3c) per-task forward transfer
@@ -459,52 +512,79 @@ def save_plots(all_results, results_dir):
                         fwt.append((pj - chance) if pj is not None else 0.0)
                     per.append(fwt); allf.extend(fwt)
                 ymin = min(min(allf) - 0.05, -0.05); ymax = max(max(allf) + 0.05, 0.05)
-                fig, ax = plt.subplots(figsize=(max(8, (n_tasks - 1) * len(seq) * 0.35 + 2), 5))
-                ax.set_title(f"Per-Task Forward Transfer -- {ds}{tag}\n"
-                             "[FWT_j = pretrain_acc(j) - chance]", fontweight="bold")
+                fig, ax = plt.subplots(figsize=fig_size(aspect=0.55))
+                ax.set_title(f"Per-Task Forward Transfer -- {ds}{tag}", fontweight="bold")
                 ax.axhspan(0, ymax, alpha=0.07, color="green", zorder=0)
                 ax.axhspan(ymin, 0, alpha=0.07, color="red", zorder=0)
                 for i, (r, fwt) in enumerate(zip(seq, per)):
                     off = (i - len(seq) / 2 + 0.5) * w
                     ax.bar(xf[:len(fwt)] + off, fwt, w, label=r["model"],
                            color=COLORS[i % len(COLORS)], edgecolor="white", linewidth=0.4)
-                ax.set_xticks(xf); ax.set_xticklabels(task_names[1:], fontsize=8)
+                ax.set_xticks(xf); ax.set_xticklabels(task_names[1:], fontsize=FS_TICK)
                 ax.set_ylabel("FWT"); ax.set_ylim(ymin, ymax)
                 ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
-                ax.legend(fontsize=7, ncol=3, loc="upper right")
-                plt.tight_layout(); fig_footer(fig, all_results)
-                fig.savefig(os.path.join(cdir, "per_task_fwt.png"), dpi=150, bbox_inches="tight")
+                ax.legend(fontsize=FS_LEGEND, ncol=3, loc="upper right")
+                plt.tight_layout()
+                save_fig(fig, os.path.join(cdir, "per_task_fwt.png"))
                 plt.close(fig)
 
-            # 4) R-matrix heatmap per model
-            for r in ds_rs:
-                mat, n = dense(cfg_R(r, cfg))
-                if mat is None:
-                    continue
-                fig, ax = plt.subplots(figsize=(max(4, n + 1), max(4, n + 1)))
-                im = ax.imshow(mat, vmin=0, vmax=1, cmap="YlOrRd", aspect="auto")
-                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                ax.set_xticks(range(n)); ax.set_yticks(range(n))
-                ax.set_xticklabels(task_names[:n], rotation=30, ha="right", fontsize=8)
-                ax.set_yticklabels(task_names[:n], fontsize=8)
-                ax.set_xlabel("Eval task"); ax.set_ylabel("After task")
-                ax.set_title(f"R-matrix: {r['model']} -- {ds}{tag}", fontweight="bold")
-                for i in range(n):
-                    for j in range(n):
-                        if not np.isnan(mat[i, j]):
-                            ax.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center",
-                                    fontsize=8, color="black" if mat[i, j] > 0.4 else "white")
-                slug_m = r["model"].lower().replace("-", "_")
-                plt.tight_layout()
-                fig.savefig(os.path.join(rdir, f"{slug_m}.png"), dpi=150, bbox_inches="tight")
-                plt.close(fig)
+            # 4) R-matrix and K-matrix heatmaps per model.
+            #    Accuracy is a magnitude on [0,1] -> sequential ramp, light to dark.
+            #    Kappa is a polarity around 0 (= chance agreement) on [-1,1] -> diverging
+            #    ramp with a neutral midpoint, so below-chance cells are unmistakable
+            #    instead of just "a bit lighter". Both scales are fixed rather than
+            #    data-driven so panels stay comparable across models and configs.
+            for getter, outdir, cmap, vmin, vmax, mname in (
+                (cfg_R, rdir, "YlOrRd",  0.0, 1.0, "R"),
+                (cfg_K, kdir, "RdBu_r", -1.0, 1.0, "K"),
+            ):
+                for r in ds_rs:
+                    mat, n = dense(getter(r, cfg))
+                    if mat is None:
+                        continue
+                    fig, ax = plt.subplots(figsize=fig_size(width_frac=0.7, aspect=0.9))
+                    # Cells above the diagonal are tasks not yet seen. On the diverging
+                    # ramp kappa=0 is white, so leaving them unpainted would make "not
+                    # evaluated" look like "chance-level"; give them their own neutral.
+                    cmap_obj = plt.get_cmap(cmap).copy()
+                    cmap_obj.set_bad("#d0d0d0")
+                    im = ax.imshow(mat, vmin=vmin, vmax=vmax, cmap=cmap_obj, aspect="auto")
+                    cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    cb.ax.tick_params(labelsize=FS_TICK)
+                    if mname == "K":     # mark the chance line on the Kappa colourbar
+                        cb.ax.axhline(0.0, color="#444444", linewidth=0.8)
+                        cb.set_label("kappa (0 = chance)", fontsize=FS_TICK)
+                    # White gridlines so adjacent same-colour cells don't merge.
+                    ax.set_xticks(np.arange(n + 1) - 0.5, minor=True)
+                    ax.set_yticks(np.arange(n + 1) - 0.5, minor=True)
+                    ax.grid(which="minor", color="white", linewidth=1.0)
+                    ax.tick_params(which="minor", length=0)
+                    ax.set_xticks(range(n)); ax.set_yticks(range(n))
+                    ax.set_xticklabels(task_names[:n], rotation=30, ha="right", fontsize=FS_TICK)
+                    ax.set_yticklabels(task_names[:n], fontsize=FS_TICK)
+                    ax.set_xlabel("Eval task"); ax.set_ylabel("After task")
+                    ax.set_title(f"{mname}-matrix: {r['model']} -- {ds}{tag}", fontweight="bold")
+                    for i in range(n):
+                        for j in range(n):
+                            v = mat[i, j]
+                            if np.isnan(v):
+                                continue
+                            # both ends of the diverging ramp are dark; only the top end
+                            # of the sequential one is.
+                            dark = (v > 0.6) if mname == "R" else (abs(v) > 0.6)
+                            ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                                    fontsize=FS_ANNOT, color="white" if dark else "black")
+                    slug_m = r["model"].lower().replace("-", "_")
+                    plt.tight_layout()
+                    save_fig(fig, os.path.join(outdir, f"{slug_m}.png"))
+                    plt.close(fig)
 
         # Config comparison (no averaging) -- all configs side by side, per dataset.
         # x = models, one bar per config; one figure per metric. -> <dataset>/comparison/
         if len(cfgs) > 1:
             cmp_dir = os.path.join(plots_dir, ds_slug, "comparison")
             os.makedirs(cmp_dir, exist_ok=True)
-            ccolors = [COLORS[i % len(COLORS)] for i in range(len(cfgs))]
+            ccolors = config_colors(len(cfgs))
             clabel  = {c: " > ".join(pair_lbl(p) for p in ds_rs[0]["per_config"][c].get("task_pairs", []))
                        for c in cfgs}
             cwidth = 0.8 / len(cfgs)
@@ -516,73 +596,95 @@ def save_plots(all_results, results_dir):
                 ("final_cohen_kappa",        "Cohen's Kappa"),
                 ("plasticity",               "Plasticity"),
                 ("stability",                "Stability"),
+                # Kappa counterparts
+                ("average_kappa_over_time",         "Avg Kappa Over Time"),
+                ("final_backward_transfer_kappa",   "Final BWT (Kappa)"),
+                ("average_backward_transfer_kappa", "Avg BWT (Kappa)"),
+                ("forward_transfer_kappa",          "Forward Transfer (Kappa)"),
+                ("plasticity_kappa",                "Plasticity (Kappa)"),
+                ("stability_kappa",                 "Stability (Kappa)"),
             ]
             for key, title in cmp_specs:
                 sub = [r for r in ds_rs if r["per_config"][cfgs[0]]["summary"].get(key) is not None]
                 if not sub:
                     continue
                 xs = np.arange(len(sub))
-                fig, ax = plt.subplots(figsize=(max(8, len(sub) * len(cfgs) * 0.45 + 2), 5))
+                allv = [r["per_config"][c]["summary"].get(key) for c in cfgs for r in sub
+                        if r["per_config"][c]["summary"].get(key) is not None]
+                hi = max(allv + [0.0]); lo = min(allv + [0.0]); rng = (hi - lo) or 1.0
+                fig, ax = plt.subplots(figsize=fig_size(aspect=0.62))
                 for ci, c in enumerate(cfgs):
                     vals  = [r["per_config"][c]["summary"].get(key) for r in sub]
                     vplot = [v if v is not None else 0.0 for v in vals]
                     off   = (ci - len(cfgs) / 2 + 0.5) * cwidth
-                    bars = ax.bar(xs + off, vplot, cwidth, label=f"{c}: {clabel[c]}",
-                                  color=ccolors[ci], edgecolor="white", linewidth=0.4)
-                    for bar, v in zip(bars, vals):
-                        if v is None:
-                            bar.set_visible(False); continue
-                        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-                                f"{v:.2f}", ha="center", va="bottom", fontsize=6)
+                    ax.bar(xs + off, vplot, cwidth, label=f"{c}: {clabel[c]}",
+                           color=ccolors[ci], edgecolor="white", linewidth=0.4)
+                    # per-bar value labels are illegible at this density (configs x models);
+                    # exact values live in the summary table. Stub ~0 bars so colour shows.
+                    zero_bar_stubs(ax, xs + off, [v if v is not None else None for v in vals],
+                                   [ccolors[ci]] * len(vals), rng, width=cwidth)
                 ax.set_xticks(xs)
-                ax.set_xticklabels([r["model"] for r in sub], rotation=35, ha="right", fontsize=8)
+                ax.set_xticklabels([r["model"] for r in sub], rotation=35, ha="right", fontsize=FS_TICK)
                 ax.set_title(f"{ds} {title} -- config comparison", fontweight="bold")
                 ax.axhline(0, color="gray", linewidth=0.6, linestyle="--")
-                ax.set_ylim(min(ax.get_ylim()[0], -0.05), max(ax.get_ylim()[1], 0.05))
-                ax.legend(title="Config (task order)", fontsize=7)
-                plt.tight_layout(); fig_footer(fig, all_results)
-                fig.savefig(os.path.join(cmp_dir, f"{key}.png"), dpi=150, bbox_inches="tight")
+                ax.set_ylim(lo - (0.08 * rng if lo < 0 else 0.02 * rng), hi + 0.08 * rng)
+                # legend below the plot: a 15-config key placed inside would cover the bars.
+                ax.legend(title="Config (task order)", fontsize=FS_LEGEND,
+                          ncol=2 if len(cfgs) <= 10 else 3,
+                          loc="upper center", bbox_to_anchor=(0.5, -0.22))
+                save_fig(fig, os.path.join(cmp_dir, f"{key}.png"))
                 plt.close(fig)
 
         if len(cfgs) > 1:
             agg_dir = os.path.join(plots_dir, ds_slug, "aggregate")
             os.makedirs(agg_dir, exist_ok=True)
             agg_labels = [r["model"] for r in ds_rs]
-            fig, axes = plt.subplots(2, 4, figsize=(20, 8))
-            fig.suptitle(f"CL Metrics (mean +/- std over {len(cfgs)} configs) -- {ds}",
-                         fontsize=12, fontweight="bold")
-            for ax, key, (title, defn) in zip(axes.flat, metric_keys, metric_titles):
-                dm = []
-                for i, (lab, r) in enumerate(zip(agg_labels, ds_rs)):
-                    mu, sd = agg_metric(r, key)
-                    if mu is not None:
-                        dm.append((lab, mu, sd, COLORS[i % len(COLORS)]))
-                ax.set_title(f"{title}\n[{defn}]", fontsize=8, pad=4)
-                ax.axhline(0, color="gray", linewidth=0.6, linestyle="--")
-                if not dm:
-                    ax.set_xticks([]); ax.set_ylim(-0.05, 0.05)
-                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
-                            transform=ax.transAxes, fontsize=9, color="#999999")
-                    continue
-                sl = [d[0] for d in dm]; sv = [d[1] for d in dm]
-                se = [d[2] for d in dm]; sc = [d[3] for d in dm]
-                xs = np.arange(len(dm))
-                ax.bar(xs, sv, yerr=se, capsize=3, color=sc, edgecolor="white",
-                       linewidth=0.5, error_kw={"elinewidth": 0.8})
-                ax.set_xticks(xs); ax.set_xticklabels(sl, rotation=40, ha="right", fontsize=7)
-                ymin = min(min(np.subtract(sv, se)) - 0.05, -0.05)
-                ymax = max(max(np.add(sv, se)) + 0.05, 0.05)
-                ax.set_ylim(ymin, ymax)
-                if key in ("final_backward_transfer", "average_backward_transfer", "forward_transfer"):
-                    ax.axhspan(0, ymax, alpha=0.07, color="green", zorder=0)
-                    ax.axhspan(ymin, 0, alpha=0.07, color="red", zorder=0)
-                for x, v, e in zip(xs, sv, se):
-                    va = "bottom" if v >= 0 else "top"
-                    off = (e + 0.01) if v >= 0 else -(e + 0.02)
-                    ax.text(x, v + off, f"{v:.2f}", ha="center", va=va, fontsize=6)
-            plt.tight_layout(); fig_footer(fig, all_results)
-            fig.savefig(os.path.join(agg_dir, "metrics_mean_std.png"), dpi=150, bbox_inches="tight")
-            plt.close(fig)
+            # Cohen's Kappa is dropped from the accuracy aggregate figure (kept in the
+            # per-config metrics.png and in the Kappa figure below). The Kappa set keeps
+            # all of its panels. Each leaves one or two slots empty in the 4x2 grid.
+            agg_sets = [
+                ([(k, t) for k, t in zip(metric_keys, metric_titles)
+                  if k != "final_cohen_kappa"],
+                 "metrics_mean_std.png", "CL Metrics", "final_accuracy"),
+                (list(zip(kappa_metric_keys, kappa_metric_titles)),
+                 "metrics_kappa_mean_std.png", "CL Metrics (Cohen's Kappa)",
+                 "average_kappa_over_time"),
+            ]
+            for agg_pairs, agg_file, agg_title, agg_probe in agg_sets:
+                if not any(agg_metric(r, agg_probe)[0] is not None for r in ds_rs):
+                    continue          # set not recorded in this run
+                fig, axes = plt.subplots(4, 2, figsize=grid_size(4, 2, panel_aspect=0.62))
+                fig.suptitle(f"{agg_title} (mean +/- std over {len(cfgs)} configs) -- {ds}",
+                             fontsize=FS_SUPTITLE, fontweight="bold")
+                for ax, (key, (title, defn)) in zip(axes.flat, agg_pairs):
+                    dm = []
+                    for i, (lab, r) in enumerate(zip(agg_labels, ds_rs)):
+                        mu, sd = agg_metric(r, key)
+                        if mu is not None:
+                            dm.append((lab, mu, sd, COLORS[i % len(COLORS)]))
+                    ax.set_title(title, fontsize=FS_TITLE, pad=3)
+                    ax.axhline(0, color="gray", linewidth=0.6, linestyle="--")
+                    if not dm:
+                        ax.set_xticks([]); ax.set_ylim(-0.05, 0.05)
+                        ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                                transform=ax.transAxes, fontsize=FS_TICK, color="#999999")
+                        continue
+                    sv = [d[1] for d in dm]
+                    se = [d[2] for d in dm]; sc = [d[3] for d in dm]
+                    xs = np.arange(len(dm))
+                    ax.bar(xs, sv, yerr=se, capsize=2, color=sc, edgecolor="white",
+                           linewidth=0.5, error_kw={"elinewidth": 0.8})
+                    ax.set_xticks([])
+                    ymin, ymax = label_bars(ax, xs, sv, errs=se, colors=sc)
+                    if "transfer" in key:        # forward/backward, accuracy or Kappa
+                        ax.axhspan(0, ymax, alpha=0.07, color="green", zorder=0)
+                        ax.axhspan(ymin, 0, alpha=0.07, color="red", zorder=0)
+                for ax in axes.flat[len(agg_pairs):]:   # hide unused subplot(s)
+                    ax.set_visible(False)
+                model_legend(fig, agg_labels, [COLORS[i % len(COLORS)] for i in range(len(agg_labels))])
+                plt.tight_layout(rect=[0, 0, 1, 0.93])
+                save_fig(fig, os.path.join(agg_dir, agg_file))
+                plt.close(fig)
 
 def run_main_experiment(model_dataset_params, datasets):
     """Phase 2a — main comparison: every model x dataset at EPOCHS on all task
@@ -627,10 +729,10 @@ if __name__ == "__main__":
     print(f"  models    : {len(MODELS)}  ->  {MODELS}", flush=True)
     print(f"  total Phase-2 combinations: {len(DATASETS) * len(MODELS)}", flush=True)
 
-    # Phase 1: best-params from the shared cache (tunes only what's missing, then reuses it).
-    model_dataset_params = load_tuned_params(TUNED_PARAMS_CACHE, DATASETS, MODELS, SEED)
+    # Phase 1: best params from the shared tuning cache.
+    model_dataset_params = load_tuned_params(TUNED_PARAMS_CACHE, DATASETS, MODELS)
 
-    # Phase 2a: main comparison (the epoch sweep lives in run_epoch_analysis.py).
+    # Phase 2a: main comparison.
     exp_dir = run_main_experiment(model_dataset_params, DATASETS)
 
     _elapsed = datetime.now() - _t_start

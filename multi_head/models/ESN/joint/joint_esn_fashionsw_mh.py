@@ -1,22 +1,22 @@
 """
-Joint Multi-Head ESN -- MNIST  (TIL Setting 2, upper bound).
+Joint Multi-Head ESN -- Fashion-MNIST (summer-vs-winter)  (TIL Setting 2, upper bound).
 
 All task heads added upfront and trained simultaneously each epoch.
 Reservoir is frozen by design; only the per-task linear heads are updated.
-Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
-Input: MNIST pixels row-by-row (B, 28, 28) — 28 time steps × 28 pixel features.
+Tasks: 3 binary summer-vs-winter tasks within a garment category
+(Tshirt/Pullover, Dress/Coat, Sandal/Ankle-boot).
+Input: Fashion-MNIST pixels row-by-row (B, 28, 28) — 28 time steps × 28 pixel features.
 """
 import os, sys, warnings, random
 import torch
 
 import torch.nn as nn
-import numpy as np
 from torch.utils.data import DataLoader
 
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from shared.metrics import CLMetrics, cohen_kappa
@@ -63,7 +63,7 @@ def run_joint_esn_fashionsw_mh(args, verbose = True):
     )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        mnist_train, mnist_test, task_pairs, max_samples, batch_size, reshape=True)
+        mnist_train, mnist_test, task_pairs, max_samples, reshape=True)
 
     model = MultiHeadESN(input_size=image_size, args=args, device=device)
     criterion = nn.CrossEntropyLoss()
@@ -134,7 +134,7 @@ def run_joint_esn_fashionsw_mh(args, verbose = True):
         acc_final = float(acc_final / _NUM_TASKS)
         avg_kappa = float(avg_kappa / _NUM_TASKS)
         print()
-        print("  MNIST results  --  ESN-Joint MH  [oracle upper bound]")
+        print("  Fashion-SW results  --  ESN-Joint MH  [oracle upper bound]")
         print("  NOTE: Only ACC_final and Cohen's kappa are valid for joint training.")
         print("  ACC_avg, BWT, FWT, Plasticity and Stability require sequential")
         print("  task evaluation (full R-matrix) and are not reported.")

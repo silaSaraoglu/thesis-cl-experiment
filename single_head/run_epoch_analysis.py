@@ -1,8 +1,8 @@
 """
 Single-Head (DIL) -- Epoch-sensitivity analysis.
 
-Re-runs the same hyperparameter tuning as run_experiment.py, then sweeps EPOCH_NUMBERS on the first CONFIGS task configs to chart each
-metric vs. training length.
+Reads the cached tuned hyperparameters, then sweeps EPOCH_NUMBERS on the first CONFIGS
+task configs to chart each metric vs. training length.
 
 """
 import os
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     print(f"  datasets  : {datasets}", flush=True)
     print(f"  models    : {len(MODELS)}  ->  {MODELS}", flush=True)
 
-    model_dataset_params = load_tuned_params(TUNED_PARAMS_CACHE, datasets, MODELS, SEED)
+    model_dataset_params = load_tuned_params(TUNED_PARAMS_CACHE, datasets, MODELS)
     # Epoch sweep + cross-epoch analysis plots.
     out_dir = run_epoch_analysis(model_dataset_params, datasets)
 

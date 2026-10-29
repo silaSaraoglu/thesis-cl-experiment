@@ -10,13 +10,12 @@ import os, sys, warnings, random
 import torch
 
 import torch.nn as nn
-import numpy as np
 from torch.utils.data import DataLoader
 
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import MNIST_CL
 from shared.metrics import CLMetrics, cohen_kappa
@@ -63,7 +62,7 @@ def run_joint_esn_mnist_mh(args, verbose = True):
     )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        mnist_train, mnist_test, task_pairs, max_samples, batch_size, reshape=True)
+        mnist_train, mnist_test, task_pairs, max_samples, reshape=True)
 
     model = MultiHeadESN(input_size=image_size, args=args, device=device)
     criterion = nn.CrossEntropyLoss()

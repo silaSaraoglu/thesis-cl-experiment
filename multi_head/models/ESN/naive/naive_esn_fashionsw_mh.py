@@ -1,5 +1,5 @@
 """
-ESN Naive Multi-Head -- Sequential MNIST  (TIL Setting 2).
+ESN Naive Multi-Head -- Fashion-MNIST (summer-vs-winter)  (TIL Setting 2).
 
 Each task gets its own independent linear head on top of the shared frozen
 reservoir.  Because the reservoir and all previous heads are never modified
@@ -9,8 +9,9 @@ At test time the oracle task ID is provided (Task-Incremental Learning upper
 bound).  This model is identical in behaviour to the EWC / LwF / Replay MH
 variants — CL regularisation is meaningless when heads are independent.
 
-Tasks: 5 binary classification tasks (digits 0-1, 2-3, 4-5, 6-7, 8-9).
-Input: MNIST pixels row-by-row (B, 28, 28) — 28 time steps × 28 pixel features.
+Tasks: 3 binary summer-vs-winter tasks within a garment category
+(Tshirt/Pullover, Dress/Coat, Sandal/Ankle-boot).
+Input: Fashion-MNIST pixels row-by-row (B, 28, 28) — 28 time steps × 28 pixel features.
 """
 import os, sys, warnings
 import torch
@@ -23,7 +24,7 @@ from torch.utils.data import DataLoader
 _p = os.path.dirname(os.path.abspath(__file__))
 while not os.path.isdir(os.path.join(_p, 'repos')): _p = os.path.dirname(_p)
 if _p not in sys.path: sys.path.insert(0, _p)
-import setup_paths
+import shared.utils
 
 from shared.dataset_cl import FashionMNISTSeason_CL
 from shared.metrics import CLMetrics, cohen_kappa
@@ -71,7 +72,7 @@ def run_esn_naive_fashionsw_mh(args, verbose = True, trial=None):
     )
 
     train_datasets, val_datasets, test_datasets = collect_datasets(
-        mnist_train, mnist_test, task_pairs, max_samples, batch_size, reshape=True)
+        mnist_train, mnist_test, task_pairs, max_samples, reshape=True)
 
     model = MultiHeadESN(input_size=image_size, args=args, device=device)
     criterion = nn.CrossEntropyLoss()
@@ -129,7 +130,7 @@ def run_esn_naive_fashionsw_mh(args, verbose = True, trial=None):
 
     test_accs = [float(metrics.R[_NUM_TASKS-1].get(j, 0.0)) for j in range(_NUM_TASKS)]
     if verbose:
-        print(f"  MNIST results  --  ESN-Naive MH")
+        print(f"  Fashion-SW results  --  ESN-Naive MH")
         print(f"  Validation : {[round(v,4) for v in subtask_val_accs]}")
         print(f"  Test       : {[round(t,4) for t in test_accs]}")
     return subtask_val_accs, test_accs, metrics
