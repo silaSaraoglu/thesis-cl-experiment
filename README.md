@@ -24,7 +24,6 @@ configuration separately.
 6. [Output files](#6-output-files)
 7. [Project layout](#7-project-layout)
 8. [Experimental setup](#8-experimental-setup)
-9. [References](#9-references)
 
 ---
 
@@ -128,15 +127,16 @@ python -c "from shared.dataset_cl import MNIST_CL, FashionMNISTSeason_CL; [C(r, 
 
 ### HHAR
 
-1. Download the **Heterogeneity Activity Recognition** dataset from UCI:
-   <https://archive.ics.uci.edu/dataset/344>
-2. Extract `Phones_accelerometer.csv` (about 1.3 GB) into `data/hhar/`.
+1. Open the **Heterogeneity Activity Recognition** page on UCI and click **Download**
+   (about 784 MB): <https://archive.ics.uci.edu/dataset/344>
+2. Unzip it. Inside is a second archive, `Activity recognition exp.zip`; unzip that too.
+3. Copy `Phones_accelerometer.csv` (about 1.3 GB) into `data/hhar/`.
 
 ### WISDM (only used by `multi_head/`)
 
-1. Download the **WISDM Activity Prediction** dataset (v1.1):
-   <https://www.cis.fordham.edu/wisdm/dataset.php>
-2. Extract `WISDM_ar_v1.1_raw.txt` into `data/wisdm/`.
+1. Open the WISDM Lab dataset page: <https://www.cis.fordham.edu/wisdm/dataset.php>
+2. Under **Activity Prediction**, download version 1.1 (`WISDM_ar_v1.1.tar.gz`).
+3. Extract it and copy `WISDM_ar_v1.1_raw.txt` into `data/wisdm/`.
 
 ### Preprocessing
 
@@ -471,51 +471,3 @@ random initialisations.
   are fixed, and the test sets never change.
 - The same machine and package versions give the same numbers. Other CPUs or BLAS
   libraries can differ in the last decimal places.
-
----
-
-## 9. References
-
-**Original code**
-
-- GIM: [AndreaCossu/ContinualLearning-SequentialProcessing](https://github.com/AndreaCossu/ContinualLearning-SequentialProcessing)
-- ESN: [Pervasive-AI-Lab/ContinualLearning-EchoStateNetworks](https://github.com/Pervasive-AI-Lab/ContinualLearning-EchoStateNetworks)
-
-**Models**
-
-- A. Cossu, A. Carta, D. Bacciu. *Continual Learning with Gated Incremental Memories for
-  Sequential Data Processing.* IJCNN, 2020. ([arXiv:2004.04077](https://arxiv.org/abs/2004.04077))
-- A. Cossu, D. Bacciu, A. Carta, C. Gallicchio, V. Lomonaco. *Continual Learning with
-  Echo State Networks.* ESANN, 2021. ([arXiv:2105.07674](https://arxiv.org/abs/2105.07674))
-- H. Jaeger. *The "Echo State" Approach to Analysing and Training Recurrent Neural
-  Networks.* GMD Report 148, 2001.
-- H. Jaeger, H. Haas. *Harnessing Nonlinearity: Predicting Chaotic Systems and Saving
-  Energy in Wireless Communication.* Science 304(5667):78–80, 2004.
-- C. Gallicchio, A. Micheli, L. Pedrelli. *Deep Reservoir Computing: A Critical
-  Experimental Analysis.* Neurocomputing 268:87–99, 2017.
-  ([doi:10.1016/j.neucom.2016.12.089](https://doi.org/10.1016/j.neucom.2016.12.089))
-  — `repos/esn/clrnn/deep_esn.py` is a PyTorch port of
-  [DeepRC-TF](https://github.com/gallicch/DeepRC-TF).
-
-**Datasets**
-
-- MNIST: Y. LeCun, L. Bottou, Y. Bengio, P. Haffner. *Gradient-Based Learning Applied
-  to Document Recognition.* Proceedings of the IEEE, 1998.
-- Fashion-MNIST: H. Xiao, K. Rasul, R. Vollgraf. *Fashion-MNIST: a Novel Image Dataset
-  for Benchmarking Machine Learning Algorithms.* arXiv:1708.07747, 2017.
-- HHAR: A. Stisen et al. *Smart Devices are Different: Assessing and Mitigating Mobile
-  Sensing Heterogeneities for Activity Recognition.* SenSys, 2015.
-  ([UCI dataset 344](https://archive.ics.uci.edu/dataset/344))
-- WISDM: J. R. Kwapisz, G. M. Weiss, S. A. Moore. *Activity Recognition using Cell Phone
-  Accelerometers.* SIGKDD Explorations, 2011.
-  ([WISDM Lab](https://www.cis.fordham.edu/wisdm/dataset.php))
-- WISDM 200-step windows: R. R. Azghan et al. *Gated Adaptation for Continual Learning
-  in Human Activity Recognition.* [arXiv:2603.10046](https://arxiv.org/abs/2603.10046).
-  (This project uses non-overlapping windows instead of 50% overlap.)
-
-**Statistical methods**
-
-- J. Demšar. *Statistical Comparisons of Classifiers over Multiple Data Sets.* JMLR
-  7:1–30, 2006. (Friedman + Nemenyi and the Critical Difference diagram)
-- S. Holm. *A Simple Sequentially Rejective Multiple Test Procedure.* Scandinavian
-  Journal of Statistics 6(2):65–70, 1979.
